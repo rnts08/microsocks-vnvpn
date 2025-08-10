@@ -33,6 +33,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
+#include <time.h>
 #include "server.h"
 #include "sblist.h"
 
@@ -63,6 +64,62 @@
 #undef THREAD_STACK_SIZE
 #define THREAD_STACK_SIZE 32*1024
 #endif
+
+// --- Username/IP mapping for whitelisted IPs ---
+#define MAX_AUTHED_IPS 256
+
+struct authed_ip_user {
+    union sockaddr_union addr;
+    char username[256];
+};
+
+static struct authed_ip_user authed_ip_users[MAX_AUTHED_IPS];
+static size_t authed_ip_users_count = 0;
+static pthread_mutex_t authed_ip_users_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Helper: compare sockaddr_union (IPv4/IPv6)
+static int sockaddr_union_equal(const union sockaddr_union *a, const union sockaddr_union *b) {
+    if (!a || !b) return 0;
+    int af = SOCKADDR_UNION_AF(a);
+    if (af != SOCKADDR_UNION_AF(b)) return 0;
+    size_t len = (af == AF_INET) ? 4 : 16;
+    const void *aptr = SOCKADDR_UNION_ADDRESS(a);
+    const void *bptr = SOCKADDR_UNION_ADDRESS(b);
+    if (!aptr || !bptr) return 0;
+    return memcmp(aptr, bptr, len) == 0;
+}
+
+// Store username for IP
+void set_username_for_ip(const union sockaddr_union *addr, const char *username) {
+    pthread_mutex_lock(&authed_ip_users_mutex);
+    for (size_t i = 0; i < authed_ip_users_count; ++i) {
+        if (sockaddr_union_equal(addr, &authed_ip_users[i].addr)) {
+            strncpy(authed_ip_users[i].username, username, sizeof(authed_ip_users[i].username)-1);
+            pthread_mutex_unlock(&authed_ip_users_mutex);
+            return;
+        }
+    }
+    if (authed_ip_users_count < MAX_AUTHED_IPS) {
+        authed_ip_users[authed_ip_users_count].addr = *addr;
+        strncpy(authed_ip_users[authed_ip_users_count].username, username, sizeof(authed_ip_users[authed_ip_users_count].username)-1);
+        authed_ip_users_count++;
+    }
+    pthread_mutex_unlock(&authed_ip_users_mutex);
+}
+
+// Lookup username for IP, returns pointer or NULL
+const char* get_username_for_ip(const union sockaddr_union *addr) {
+    pthread_mutex_lock(&authed_ip_users_mutex);
+    for (size_t i = 0; i < authed_ip_users_count; ++i) {
+        if (sockaddr_union_equal(addr, &authed_ip_users[i].addr)) {
+            pthread_mutex_unlock(&authed_ip_users_mutex);
+            return authed_ip_users[i].username;
+        }
+    }
+    pthread_mutex_unlock(&authed_ip_users_mutex);
+    return NULL;
+}
+
 
 static int quiet;
 static const char* auth_user;
@@ -102,6 +159,8 @@ struct thread {
 	struct client client;
 	enum socksstate state;
 	volatile int  done;
+	volatile size_t bytes_sent;     // Add
+	volatile size_t bytes_received; // Add
 };
 
 #ifndef CONFIG_LOG
@@ -266,7 +325,7 @@ static void send_error(int fd, enum errorcode ec) {
 	write(fd, buf, 10);
 }
 
-static void copyloop(int fd1, int fd2) {
+static void copyloop(int fd1, int fd2, struct thread *t) {
 	struct pollfd fds[2] = {
 		[0] = {.fd = fd1, .events = POLLIN},
 		[1] = {.fd = fd2, .events = POLLIN},
@@ -292,6 +351,8 @@ static void copyloop(int fd1, int fd2) {
 		char buf[MIN(16*1024, THREAD_STACK_SIZE/2)];
 		ssize_t sent = 0, n = read(infd, buf, sizeof buf);
 		if(n <= 0) return;
+		if (infd == fd1) t->bytes_received += n;
+		else t->bytes_sent += n;
 		while(sent < n) {
 			ssize_t m = write(outfd, buf+sent, n-sent);
 			if(m < 0) return;
@@ -300,7 +361,7 @@ static void copyloop(int fd1, int fd2) {
 	}
 }
 
-static enum errorcode check_credentials(unsigned char* buf, size_t n) {
+static enum errorcode check_credentials(unsigned char* buf, size_t n, struct client* client) {
 	if(n < 5) return EC_GENERAL_FAILURE;
 	if(buf[0] != 1) return EC_GENERAL_FAILURE;
 	unsigned ulen, plen;
@@ -313,7 +374,13 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n) {
 	memcpy(pass, buf+2+ulen+1, plen);
 	user[ulen] = 0;
 	pass[plen] = 0;
-	if(!strcmp(user, auth_user) && !strcmp(pass, auth_pass)) return EC_SUCCESS;
+	if(!strcmp(user, auth_user) && !strcmp(pass, auth_pass)) {
+        if (client) {
+            strncpy(client->username, user, sizeof(client->username)-1);
+            set_username_for_ip(&client->addr, user); // <-- add this line
+        }
+        return EC_SUCCESS;
+    }
 	return EC_NOT_ALLOWED;
 }
 
@@ -327,13 +394,18 @@ static int handshake(struct thread *t) {
 		switch(t->state) {
 			case SS_1_CONNECTED:
 				am = check_auth_method(buf, n, &t->client);
-				if(am == AM_NO_AUTH) t->state = SS_3_AUTHED;
+				if(am == AM_NO_AUTH) {
+                    t->state = SS_3_AUTHED;
+                    // If IP is whitelisted, set username from mapping
+                    const char *uname = get_username_for_ip(&t->client.addr);
+                    if (uname) strncpy(t->client.username, uname, sizeof(t->client.username)-1);
+                }
 				else if (am == AM_USERNAME) t->state = SS_2_NEED_AUTH;
 				send_auth_response(t->client.fd, 5, am);
 				if(am == AM_INVALID) return -1;
 				break;
 			case SS_2_NEED_AUTH:
-				ret = check_credentials(buf, n);
+				ret = check_credentials(buf, n, &t->client); // Pass client pointer
 				send_auth_response(t->client.fd, 1, ret);
 				if(ret != EC_SUCCESS)
 					return -1;
@@ -358,15 +430,25 @@ static int handshake(struct thread *t) {
 }
 
 static void* clientthread(void *data) {
-	struct thread *t = data;
-	int remotefd = handshake(t);
-	if(remotefd != -1) {
-		copyloop(t->client.fd, remotefd);
-		close(remotefd);
-	}
-	close(t->client.fd);
-	t->done = 1;
-	return 0;
+    struct thread *t = data;
+    int remotefd = handshake(t);
+    if(remotefd != -1) {
+        copyloop(t->client.fd, remotefd, t);
+        close(remotefd);
+    }
+    close(t->client.fd);
+
+    // Log stats at connection end
+    char ipstr[64] = "";
+    int af = SOCKADDR_UNION_AF(&t->client.addr);
+    void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+    inet_ntop(af, ipdata, ipstr, sizeof ipstr);
+    const char *user = t->client.username[0] ? t->client.username : "(none)";
+    dolog("Connection closed: user=%s ip=%s sent=%zuB recv=%zuB\n",
+        user, ipstr, t->bytes_sent, t->bytes_received);
+
+    t->done = 1;
+    return 0;
 }
 
 static void collect(sblist *threads) {
@@ -410,6 +492,33 @@ static void zero_arg(char *s) {
 	size_t i, l = strlen(s);
 	for(i=0;i<l;i++) s[i] = 0;
 }
+
+static sblist *threads = NULL;
+
+/* Periodic logger thread */
+static void* logger_thread(void *arg) {
+    (void)arg;
+    while(1) {
+        sleep(60);
+        time_t now = time(NULL);
+        char timestr[32];
+        strftime(timestr, sizeof(timestr), "%Y-%m-%d %H:%M:%S", localtime(&now));
+        if (!threads) continue;
+        for(size_t i=0;i<sblist_getsize(threads);i++) {
+            struct thread* t = *((struct thread**)sblist_get(threads, i));
+            if(t->done) continue;
+            char ipstr[64] = "";
+            int af = SOCKADDR_UNION_AF(&t->client.addr);
+            void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+            inet_ntop(af, ipdata, ipstr, sizeof ipstr);
+            const char *user = t->client.username[0] ? t->client.username : "(none)";
+            dolog("[%s] Active: user=%s ip=%s sent=%zuB recv=%zuB\n",
+                timestr, user, ipstr, t->bytes_sent, t->bytes_received);
+        }
+    }
+    return NULL;
+}
+
 
 int main(int argc, char** argv) {
 	int ch;
@@ -480,12 +589,19 @@ int main(int argc, char** argv) {
 	}
 	server = &s;
 
+	// Start logger thread
+	pthread_t logpt;
+	pthread_create(&logpt, NULL, logger_thread, NULL);
+
 	while(1) {
 		collect(threads);
-		struct client c;
+		struct client c = {0};
 		struct thread *curr = malloc(sizeof (struct thread));
 		if(!curr) goto oom;
 		curr->done = 0;
+		curr->bytes_sent = 0;
+		curr->bytes_received = 0;
+		memset(curr->client.username, 0, sizeof(curr->client.username));
 		if(server_waitclient(&s, &c)) {
 			dolog("failed to accept connection\n");
 			free(curr);
@@ -507,7 +623,7 @@ int main(int argc, char** argv) {
 			pthread_attr_setstacksize(a, THREAD_STACK_SIZE);
 		}
 		if(pthread_create(&curr->pt, a, clientthread, curr) != 0)
-			dolog("pthread_create failed. OOM?\n");
-		if(a) pthread_attr_destroy(&attr);
+            dolog("pthread_create failed. OOM?\n");
+        if(a) pthread_attr_destroy(&attr);
 	}
 }

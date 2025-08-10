@@ -8,8 +8,6 @@
 #include <netdb.h>
 #include <netinet/in.h>
 
-#pragma RcB2 DEP "server.c"
-
 union sockaddr_union {
 	struct sockaddr_in  v4;
 	struct sockaddr_in6 v6;
@@ -30,8 +28,9 @@ union sockaddr_union {
 	( SOCKADDR_UNION_AF(PTR) == AF_INET6 ) ? (PTR)->v6.sin6_port : 0 ) )
 
 struct client {
-	union sockaddr_union addr;
-	int fd;
+    int fd;
+    union sockaddr_union addr;
+    char username[256]; // Add this line to store username
 };
 
 struct server {
