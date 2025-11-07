@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>Account: {{ row['username'] }}</h2>
+  <p><strong>Created:</strong> {{ row['created'] }} &nbsp; <strong>Updated:</strong> {{ row['updated'] }} &nbsp; <strong>Last Seen:</strong> {{ row['last_seen'] or 'never' }}</p>
+  <p><strong>Monthly Bandwidth:</strong> {% if row['monthly_bandwidth'] and row['monthly_bandwidth'] > 0 %}{{ row['monthly_bandwidth']|bytes_to_gb }}{% else %}unlimited{% endif %}</p>
+  <p><strong>Monthly Usage:</strong> {{ row['m_bytes_sent']|human_readable }} sent, {{ row['m_bytes_received']|human_readable }} received</p>
+  <p><strong>Total Usage:</strong> {{ row['total_bytes_sent']|human_readable }} sent, {{ row['total_bytes_received']|human_readable }} received</p>
+  <p><strong>Current Connections:</strong> {{ row['online'] }}</p>
+  <p><strong>Whitelisted IPs:</strong> {{ row['whitelist'] or 'none' }}</p>
+  <h3>Recent Connections</h3>
+  <table>
+    <thead><tr><th>Timestamp</th><th>Client IP</th><th>Destination</th><th>Status</th><th>Transfer</th></tr></thead>
+    <tbody>
+      {% for c in conns %}
+        <tr>
+          <td>{{ c['ts'] }}</td>
+          <td>{{ c['client_ip'] }}</td>
+          <td>{{ c['destination'] }}</td>
+          <td>{{ c['status'] }}</td>
+          <td>{{ c['bytes_sent']|human_readable }}/{{ c['bytes_received']|human_readable }}</td>
+        </tr>
+      {% endfor %}
+      {% if not conns %}<tr><td colspan="5" class="muted">No recent connections</td></tr>{% endif %}
+    </tbody>
+  </table>
+  <p><a href="{{ url_for('index') }}">Back</a> |<a href="{{ url_for('update_user', username=row['username']) }}">Edit</a> | <a href="{{ url_for('delete_user', username=row['username']) }}">Delete</a></p>
+{% endblock %}

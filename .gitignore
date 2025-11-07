@@ -1,3 +1,130 @@
+# Object files
 *.o
 *.out
 
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables and secrets
+*.env
+.env.*
+!example.env
+instance/
+config.py
+settings.py
+
+# Flask instance folder
+instance/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django / Flask stuff:
+db.sqlite3
+*.db
+*.sqlite
+*.sqlite3
+microsocks.db
+
+# Logs and debug output
+*.log
+*.bak
+*.swp
+*.swo
+
+# Jupyter / IPython
+.ipynb_checkpoints
+
+# Editor directories and files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+MANIFEST
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Coverage and profiling data
+.prof
+.profraw
+.perf
+
+# Flask-specific cache
+flask_session/
+__debug__/
+
+# Static asset pipelines
+node_modules/
+*.map
+*.lock
+
+# Optional: compiled frontend files (if using JS build tools)
+dist/
+build/
+
+# Local testing / sandbox data
+test_data/
+uploads/
+
+# Don't upload sqlite database files
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Ignore microsocks build artifacts
+microsocks
+msadmin
+microsocks.exe
+microsocks.pdb
+microsocks.dSYM/

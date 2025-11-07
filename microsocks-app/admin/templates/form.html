@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block content %}
+  {% if action == 'add' %}
+    <h2>Add Account</h2>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <p><label>Username: <input name="username"></label></p>
+      <p><label>Password: <input name="password" type="password"></label></p>
+      <p><label>Monthly Bandwidth (bytes, 0 = unlimited): <input name="monthly_bandwidth" value="0"></label></p>
+      <p><label>Whitelisted IPs (comma-separated): <input name="whitelist" value="{{ row['whitelist'] }}"></label></p>
+      <p><a href="javascript:history.go(-1);"><button type="button">Cancel</button></a><button type="submit">Create</button></p>
+    </form>
+  {% else %}
+    <h2>Update Account: {{ row['username'] }}</h2>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <p><label>New Password (leave empty to keep): <input name="password" type="password"></label></p>
+      <p><label>Monthly Bandwidth (bytes): <input name="monthly_bandwidth" value="{{ row['monthly_bandwidth'] }}"></label></p>
+      <p><label>Whitelisted IPs (comma-separated): <input name="whitelist" value="{{ row['whitelist'] }}"></label></p>
+      <p><a href="javascript:history.go(-1);"><button type="button">Cancel</button></a><button type="submit">Update</button></p>
+    </form>
+  {% endif %}
+{% endblock %}

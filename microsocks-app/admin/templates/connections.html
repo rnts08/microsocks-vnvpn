@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+{% block content %}
+  <h2>Connections</h2>
+
+  <div id="totals" class="muted" style="margin-bottom: 10px;">
+<strong>Totals:</strong>
+Sent <span id="total-sent">{{ totals.total_sent | human_readable }}</span>,
+Received <span id="total-recv">{{ totals.total_received | human_readable }}</span><br>
+<strong>This month:</strong>
+Sent <span id="month-sent">{{ monthly_totals.month_sent | human_readable }}</span>,
+Received <span id="month-recv">{{ monthly_totals.month_received | human_readable }}</span>
+
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>User</th>
+        <th>Client IP</th>
+        <th>Destination</th>
+        <th>Status</th>
+        <th>Bytes Sent</th>
+        <th>Bytes Received</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>{{ r.ts }}</td>
+          <td>{{ r.username }}</td>
+          <td>{{ r.client_ip }}</td>
+          <td>{{ r.destination }}</td>
+          <td>{{ r.status }}</td>
+          <td>{{ r.bytes_sent | human_readable }}</td>
+          <td>{{ r.bytes_received | human_readable }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="muted" style="margin-top:10px;">
+    {% if page > 1 %}
+      <a href="{{ url_for('list_connections', page=page-1) }}">Previous</a>
+    {% endif %}
+    Page {{ page }} of {{ total_pages }}
+    {% if page < total_pages %}
+      <a href="{{ url_for('list_connections', page=page+1) }}">Next</a>
+    {% endif %}
+  </div>
+
+  <script>
+    async function updateConnectionStats() {
+      try {
+        const res = await fetch("{{ url_for('connections_stats') }}");
+        if (!res.ok) return;
+        const data = await res.json();
+
+const humanReadable = v => {
+  if (v < 1000) return v + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = v / 1000;
+  for (const u of units) {
+    if (size < 1000) return size.toFixed(2) + " " + u;
+    size /= 1000;
+  }
+  return size.toFixed(2) + " PB";
+};
+
+document.getElementById("total-sent").textContent = humanReadable(data.total_sent);
+document.getElementById("total-recv").textContent = humanReadable(data.total_received);
+document.getElementById("month-sent").textContent = humanReadable(data.month_sent);
+document.getElementById("month-recv").textContent = humanReadable(data.month_received);
+
+      } catch (err) {
+        console.warn("Failed to update connection stats:", err);
+      }
+    }
+
+    // Update every 30 seconds
+    setInterval(updateConnectionStats, 30_000);
+  </script>
+{% endblock %}
