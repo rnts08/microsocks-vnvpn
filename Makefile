@@ -5,6 +5,7 @@ prefix = /usr/local
 bindir = $(prefix)/bin
 mandir = $(prefix)/share/man
 docdir = $(prefix)/share/doc/microsocks
+sysconfdir = /etc
 
 PROG = microsocks
 MSADMIN = msadmin
@@ -33,8 +34,8 @@ install: $(PROG) $(MSADMIN)
 	# Install documentation
 	$(INSTALL) -D -m 644 README.md $(DESTDIR)$(docdir)/README.md
 	$(INSTALL) -D -m 644 COPYING $(DESTDIR)$(docdir)/COPYING
-	# Install configuration
-	$(INSTALL) -D -m 644 microsocks.conf $(DESTDIR)$(prefix)/etc/microsocks/microsocks.conf
+	# Install configuration to system config directory (/etc/microsocks)
+	$(INSTALL) -D -m 644 microsocks.conf $(DESTDIR)$(sysconfdir)/microsocks/microsocks.conf
 
 clean:
 	rm -f $(PROG)

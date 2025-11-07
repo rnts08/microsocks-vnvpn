@@ -1,0 +1,81 @@
+.Dd February 11, 2025
+.Dt MICROSOCKS 1
+.Os
+.Sh NAME
+.Nm microsocks
+.Nd tiny SOCKS5 server with very moderate resource usage
+.Sh SYNOPSIS
+.Bk -words
+.Bl -tag -width microsocks
+.It Nm
+.Op Fl f Ar config
+.Op Fl q
+.Op Fl b Ar ip
+.Op Fl i Ar addr
+.Op Fl p Ar port
+.Op Fl L Ar logfile
+.Op Fl d Ar dbpath
+.Op Fl -print-config
+.Oc
+.El
+.Ek
+.Sh DESCRIPTION
+.Nm microsocks
+is a multithreaded, tiny, portable SOCKS5 server with very moderate resource
+usage that you can run on your remote boxes to tunnel connections through them,
+if for some reason SSH doesn't cut it for you.
+It is very lightweight, and very light on resources too: for every client, a
+thread with a low stack size is spawned. the main process basically doesn't
+consume any resources at all. It is also designed to be robust: it handles
+resource exhaustion gracefully by simply denying new connections, instead of
+calling
+.Xr abort 3
+as most other programs do these days.
+Another plus is ease-of-use: no config file necessary, everything can be done
+from the command line and doesn't even need any parameters for quick setup.
+..Sh OPTIONS
+The following options are supported by
+.Nm :
+.Bl -tag -width indent
+.It Fl b Ar ip
+Specifies IP address outgoing connections are bound to.
+.It Fl i Ar addr
+Specifies local address to listen connections on. Host name or IP address can be
+supplied. Default to
+.Cm 0.0.0.0 .
+.It Fl p
+TCP port to listen to. Default to
+.Cm 1080 .
+.It Fl q
+Quiet mode: suppress logging messages.
+.It Fl f Ar config
+Path to an INI-style configuration file. Default: /etc/microsocks/microsocks.conf. CLI flags override values in the config file.
+.It Fl -print-config
+Print the effective configuration including defaults and exit.
+.It Fl L Ar logfile
+Path to a logfile. By default logs are written to stderr. If specified, all logs are appended to the file.
+.It Fl d Ar dbpath
+Database path (default: microsocks.db).
+.El
+..Sh EXAMPLES
+Require authentication for all except two specified hosts (use whitelist):
+.Pp
+.Dl $ microsocks -w 192.168.1.100,192.168.1.101 -d microsocks.db
+.Pp
+Listen on port 8080 and use 46.62.90.74 as a source IP for external connections.
+.Pp
+.Dl $ microsocks -i 0.0.0.0 -b 46.62.90.74 -p 8080 -d microsocks.db
+.Pp
+Create an account with the admin tool and then connect through the proxy:
+.Pp
+.Dl $ ./msadmin add alice secret
+.Pp
+.Dl $ curl --socks5 alice:secret@127.0.0.1:1080 https://freebsd.org
+.Sh AUTHORS
+Author of
+.Nm
+is
+.An rofl0r Aq Lk https://github.com/rofl0r/microsocks
+.Pp
+This man page is maintained by
+.An Viacheslav Chimishuk Aq Mt vchimishuk@yandex.ru

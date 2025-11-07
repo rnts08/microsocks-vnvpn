@@ -1,0 +1,14 @@
+[Unit]
+Description=MicroSocks SOCKS5 Proxy
+After=network.target
+
+[Service]
+Type=simple
+# Adjust User/Group to match your runtime user
+User=nobody
+Group=nogroup
+ExecStart=/usr/local/bin/microsocks -f /etc/microsocks/microsocks.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
