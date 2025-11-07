@@ -3,8 +3,8 @@
         {
             "previewLimit": 50,
             "driver": "SQLite",
-            "database": "${workspaceFolder:microsocks-clean}/test.db",
-            "name": "msdb"
+            "database": "${workspaceFolder:microsocks-clean}/microsocks.db",
+            "name": "microsocks"
         }
     ]
 }

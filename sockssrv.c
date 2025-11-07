@@ -67,10 +67,6 @@
 #endif
 
 static int quiet;
-static const char* auth_user;
-static const char* auth_pass;
-static sblist* auth_ips;
-static pthread_rwlock_t auth_ips_lock = PTHREAD_RWLOCK_INITIALIZER;
 static const struct server* server;
 static union sockaddr_union bind_addr = {.v4.sin_family = AF_UNSPEC};
 
@@ -214,27 +210,43 @@ static int connect_socks_target(unsigned char *buf, size_t n, struct client *cli
 	return fd;
 }
 
-static int is_authed(union sockaddr_union *client, union sockaddr_union *authedip) {
-	int af = SOCKADDR_UNION_AF(authedip);
-	if(af == SOCKADDR_UNION_AF(client)) {
-		size_t cmpbytes = af == AF_INET ? 4 : 16;
-		void *cmp1 = SOCKADDR_UNION_ADDRESS(client);
-		void *cmp2 = SOCKADDR_UNION_ADDRESS(authedip);
-		if(!memcmp(cmp1, cmp2, cmpbytes)) return 1;
-	}
-	return 0;
-}
+/* Check if an IP is in the account's whitelist
+   Returns:
+   1 = IP is allowed (either in whitelist or whitelist is empty)
+   0 = IP is not in whitelist */
+static int is_ip_allowed(int account_id, const char *client_ip) {
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT whitelist FROM accounts WHERE id = ?";
+    int allowed = 0;
+    sqlite3 *db = db_get_handle();
 
-static int is_in_authed_list(union sockaddr_union *caddr) {
-	size_t i;
-	for(i=0;i<sblist_getsize(auth_ips);i++)
-		if(is_authed(caddr, sblist_get(auth_ips, i)))
-			return 1;
-	return 0;
-}
+    if (!db) return 0;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return 0;
 
-static void add_auth_ip(union sockaddr_union *caddr) {
-	sblist_add(auth_ips, caddr);
+    sqlite3_bind_int(stmt, 1, account_id);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *whitelist = (const char*)sqlite3_column_text(stmt, 0);
+        if (!whitelist || !*whitelist) {
+            allowed = 1; /* empty whitelist = allow all */
+        } else {
+            char *wlist = strdup(whitelist);
+            if (wlist) {
+                char *saveptr;
+                char *token = strtok_r(wlist, ",", &saveptr);
+                while (token) {
+                    if (strcmp(token, client_ip) == 0) {
+                        allowed = 1;
+                        break;
+                    }
+                    token = strtok_r(NULL, ",", &saveptr);
+                }
+                free(wlist);
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    return allowed;
 }
 
 static enum authmethod check_auth_method(unsigned char *buf, size_t n, struct client*client) {
@@ -243,23 +255,15 @@ static enum authmethod check_auth_method(unsigned char *buf, size_t n, struct cl
 	if(idx >= n ) return AM_INVALID;
 	int n_methods = buf[idx];
 	idx++;
+	int has_username = 0;
 	while(idx < n && n_methods > 0) {
-		if(buf[idx] == AM_NO_AUTH) {
-			if(!auth_user) return AM_NO_AUTH;
-			else if(auth_ips) {
-				int authed = 0;
-				if(pthread_rwlock_rdlock(&auth_ips_lock) == 0) {
-					authed = is_in_authed_list(&client->addr);
-					pthread_rwlock_unlock(&auth_ips_lock);
-				}
-				if(authed) return AM_NO_AUTH;
-			}
-		} else if(buf[idx] == AM_USERNAME) {
-			if(auth_user) return AM_USERNAME;
-		}
+		if(buf[idx] == AM_USERNAME) has_username = 1;
 		idx++;
 		n_methods--;
 	}
+	/* Always require username/password auth if offered */
+	if(has_username) return AM_USERNAME;
+	/* Reject if no supported auth method */
 	return AM_INVALID;
 }
 
@@ -330,9 +334,23 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n, struct thr
 	user[ulen] = 0;
 	pass[plen] = 0;
 
+	/* Get client IP for checks */
+	char client_ip[INET6_ADDRSTRLEN];
+	void *addr_ptr = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+	inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), addr_ptr, client_ip, sizeof(client_ip));
+
 	/* Use database authentication */
 	t->account_id = db_account_auth(user, pass);
-	if(t->account_id >= 0) return EC_SUCCESS;
+	if(t->account_id == -2) return EC_NOT_ALLOWED; /* account disabled */
+	if(t->account_id >= 0) {
+		/* Check whitelist */
+		if(!is_ip_allowed(t->account_id, client_ip)) 
+			return EC_NOT_ALLOWED;
+		
+		/* Update last client IP */
+		db_account_update_last_ip(t->account_id, client_ip);
+		return EC_SUCCESS;
+	}
 	return EC_NOT_ALLOWED;
 }
 
@@ -357,17 +375,6 @@ static int handshake(struct thread *t) {
 				if(ret != EC_SUCCESS)
 					return -1;
 				t->state = SS_3_AUTHED;
-				if(auth_ips && !pthread_rwlock_wrlock(&auth_ips_lock)) {
-					if(!is_in_authed_list(&t->client.addr)) {
-						add_auth_ip(&t->client.addr);
-						/* Add to database whitelist */
-						char ip[INET6_ADDRSTRLEN];
-						void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
-						inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, ip, sizeof(ip));
-						db_account_add_whitelist(t->account_id, ip);
-					}
-					pthread_rwlock_unlock(&auth_ips_lock);
-				}
 				break;
 			case SS_3_AUTHED:
 				ret = connect_socks_target(buf, n, &t->client, t->dest, sizeof t->dest);
@@ -440,6 +447,16 @@ static void* clientthread(void *data) {
 		}
 	}
 
+	/* Log connection to database */
+	if (t->account_id >= 0) {
+		char clientname[256];
+		void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+		inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, clientname, sizeof clientname);
+		db_log_connection(t->account_id, clientname, t->dest[0] ? t->dest : "-",
+						 remotefd != -1 ? "success" : "failed",
+						 t->bytes_client_to_remote, t->bytes_remote_to_client);
+	}
+
 	close(t->client.fd);
 	t->done = 1;
 	return 0;
@@ -462,70 +479,36 @@ static int usage(void) {
 	dprintf(2,
 		"MicroSocks SOCKS5 Server\n"
 		"------------------------\n"
-		"usage: microsocks -1 -q -i listenip -p port -u user -P pass -b bindaddr -w ips -d dbpath\n"
+		"usage: microsocks -q -i listenip -p port -b bindaddr -d dbpath\n"
 		"all arguments are optional.\n"
 		"by default listenip is 0.0.0.0 and port 1080.\n\n"
 		"option -q disables logging.\n"
 		"option -b specifies which ip outgoing connections are bound to\n"
-		"option -w allows to specify a comma-separated whitelist of ip addresses,\n"
-		" that may use the proxy without user/pass authentication.\n"
-		" e.g. -w 127.0.0.1,192.168.1.1.1,::1 or just -w 10.0.0.1\n"
-		" to allow access ONLY to those ips, choose an impossible to guess user/pw combo.\n"
-		"option -1 activates auth_once mode: once a specific ip address\n"
-		" authed successfully with user/pass, it is added to a whitelist\n"
-		" and may use the proxy without auth.\n"
-		" this is handy for programs like firefox that don't support\n"
-		" user/pass auth. for it to work you'd basically make one connection\n"
-		" with another program that supports it, and then you can use firefox too.\n"
+		"option -d specifies the path to the SQLite database (default: microsocks.db)\n"
+		"\n"
+		"Authentication is handled by the database. Create accounts with enabled=1\n"
+		"and optionally set a whitelist of IPs in the accounts table.\n"
+		"An empty whitelist allows connections from any IP address.\n"
 	);
 	return 1;
 }
 
 /* prevent username and password from showing up in top. */
-static void zero_arg(char *s) {
-	size_t i, l = strlen(s);
-	for(i=0;i<l;i++) s[i] = 0;
-}
+/* zero_arg removed: command-line user/pass args are no longer supported; server
+   authenticates exclusively against the database. */
 
 int main(int argc, char** argv) {
 	int ch;
 	const char *listenip = "0.0.0.0";
 	const char *dbpath = "microsocks.db";
-	char *p, *q;
 	unsigned port = 1080;
-	while((ch = getopt(argc, argv, ":1qb:i:p:u:P:w:d:")) != -1) {
+	while((ch = getopt(argc, argv, ":qb:i:p:d:")) != -1) {
 		switch(ch) {
-			case 'w': /* fall-through */
-			case '1':
-				if(!auth_ips)
-					auth_ips = sblist_new(sizeof(union sockaddr_union), 8);
-				if(ch == '1') break;
-				p = optarg;
-				while(1) {
-					union sockaddr_union ca;
-					if((q = strchr(p, ','))) *q = 0;
-					if(resolve_sa(p, 0, &ca)) {
-						dprintf(2, "error: failed to resolve %s\n", p);
-						return 1;
-					}
-					add_auth_ip(&ca);
-					if(q) *(q++) = ',', p = q;
-					else break;
-				}
-				break;
 			case 'q':
 				quiet = 1;
 				break;
 			case 'b':
 				resolve_sa(optarg, 0, &bind_addr);
-				break;
-			case 'u':
-				auth_user = strdup(optarg);
-				zero_arg(optarg);
-				break;
-			case 'P':
-				auth_pass = strdup(optarg);
-				zero_arg(optarg);
 				break;
 			case 'i':
 				listenip = optarg;
@@ -542,14 +525,6 @@ int main(int argc, char** argv) {
 			case '?':
 				return usage();
 		}
-	}
-	if((auth_user && !auth_pass) || (!auth_user && auth_pass)) {
-		dprintf(2, "error: user and pass must be used together\n");
-		return 1;
-	}
-	if(auth_ips && !auth_pass) {
-		dprintf(2, "error: -1/-w options must be used together with user/pass\n");
-		return 1;
 	}
 	signal(SIGPIPE, SIG_IGN);
 
@@ -572,6 +547,8 @@ int main(int argc, char** argv) {
 		struct client c;
 		struct thread *curr = malloc(sizeof (struct thread));
 		if(!curr) goto oom;
+		memset(curr, 0, sizeof(struct thread));
+		curr->account_id = -1; /* not authenticated by default */
 		curr->done = 0;
 		if(server_waitclient(&s, &c)) {
 			dolog("failed to accept connection\n");

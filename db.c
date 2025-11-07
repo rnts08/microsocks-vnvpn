@@ -27,6 +27,8 @@ static const char *schema_sql =
     "  username TEXT UNIQUE NOT NULL,"
     "  password TEXT NOT NULL,"
     "  whitelist TEXT,"
+    "  enabled INTEGER NOT NULL DEFAULT 1,"
+    "  last_client_ip TEXT,"
     "  ts_created INTEGER NOT NULL,"
     "  ts_updated INTEGER NOT NULL,"
     "  ts_seen INTEGER NOT NULL,"
@@ -138,7 +140,7 @@ int db_account_create(const char *username, const char *password, int64_t monthl
 
 int db_account_auth(const char *username, const char *password) {
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT id, password FROM accounts WHERE username = ? LIMIT 1";
+    const char *sql = "SELECT id, password, enabled FROM accounts WHERE username = ? LIMIT 1";
     int id = -1;
 
     if (!db) return -1;
@@ -148,6 +150,11 @@ int db_account_auth(const char *username, const char *password) {
     sqlite3_bind_text(stmt, 1, username, -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const unsigned char *stored = sqlite3_column_text(stmt, 1);
+        int enabled = sqlite3_column_int(stmt, 2);
+        if (!enabled) {
+            sqlite3_finalize(stmt);
+            return -2; /* special code for disabled accounts */
+        }
         if (stored && password) {
             /* verify hash */
             if (crypto_pwhash_str_needs_rehash((const char*)stored,
@@ -264,6 +271,20 @@ int db_account_check_whitelist(int account_id, union sockaddr_union *addr) {
 
     sqlite3_finalize(stmt);
     return allowed;
+}
+
+int db_account_update_last_ip(int account_id, const char *client_ip) {
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "UPDATE accounts SET last_client_ip = ? WHERE id = ?";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3_bind_text(stmt, 1, client_ip, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, account_id);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
 }
 
 int db_account_add_whitelist(int account_id, const char *ip) {

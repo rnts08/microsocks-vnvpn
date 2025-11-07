@@ -41,26 +41,44 @@ libc is not even 50 KB. that's easily usable even on the cheapest routers.
 command line options
 --------------------
 
-    microsocks -1 -q -i listenip -p port -u user -P passw -b bindaddr -w wl
+    microsocks -q -i listenip -p port -b bindaddr -w wl -d dbpath
 
-all arguments are optional.
-by default listenip is 0.0.0.0 and port 1080.
+All arguments are optional. By default `listenip` is `0.0.0.0` and port `1080`.
 
-- option -q disables logging.
-- option -b specifies which ip outgoing connections are bound to
-- option -w allows to specify a comma-separated whitelist of ip addresses,
-that may use the proxy without user/pass authentication.
-e.g. -w 127.0.0.1,192.168.1.1.1,::1 or just -w 10.0.0.1
-to allow access ONLY to those ips, choose an impossible to guess user/pw combo.
-- option -1 activates auth_once mode: once a specific ip address
-authed successfully with user/pass, it is added to a whitelist
-and may use the proxy without auth.
-this is handy for programs like firefox that don't support
-user/pass auth. for it to work you'd basically make one connection
-with another program that supports it, and then you can use firefox too.
-for example, authenticate once using curl:
+- option `-q` disables logging.
+- option `-b` specifies which IP outgoing connections are bound to.
+- option `-w` allows specifying a comma-separated whitelist of IP addresses that may use the proxy without database authentication.
+  e.g. `-w 127.0.0.1,192.168.1.100,::1` or just `-w 10.0.0.1`.
+  To allow access ONLY to those IPs, choose an impossible-to-guess password for any DB accounts (or don't create accounts at all).
 
-    curl --socks5 user:password@listenip:port anyurl
+Authentication note (DB-based)
+------------------------------
+
+This build requires authentication against the bundled SQLite database. The server no longer accepts static `-u`/`-P` CLI credentials; instead, create accounts in the database or add client IPs to the whitelist with `-w`.
+
+To create an initial database and add a user (plaintext passwords are accepted and will be re-hashed on first login):
+
+    # Preferred: use the bundled admin tool to create accounts (creates DB/schema if missing)
+    ./msadmin add alice secret123
+
+    # Alternatively, the server will create the DB/schema automatically when started.
+    # Start the server once to create the DB, then add an account with msadmin or sqlite3.
+
+    # Example using sqlite3 to insert a plaintext account (msadmin is preferred):
+    sqlite3 microsocks.db "INSERT INTO accounts (username, password, ts_created, ts_updated, ts_seen) VALUES ('alice', 'secret123', strftime('%s','now'), strftime('%s','now'), strftime('%s','now'));"
+
+Before making schema changes or running migrations, back up your DB:
+
+    cp microsocks.db microsocks.db.bak
+
+After creating the account you can test authentication via curl (example):
+
+    curl --socks5 alice:secret123@127.0.0.1:1080 https://example.com
+
+Migration and password hashing
+------------------------------
+
+If you need to migrate plaintext passwords to Argon2id (libsodium), use the `msadmin` tool and the provided `scripts/migrate-run.sh` wrapper. That script will create a timestamped backup before running the migration. See `MIGRATION.md` for details.
 
 Supported SOCKS5 Features
 -------------------------
@@ -79,3 +97,13 @@ if this fixes your issue please file a pull request.
 
 microsocks uses the smallest safe thread stack size to minimize overall memory
 usage.
+
+Build note
+----------
+
+The project previously contained nonstandard `#pragma RcB2` directives in some
+headers which produced warnings on modern compilers ("ignoring '#pragma RcB2'").
+Those pragmas were project-specific build hints and are not supported by
+standard compilers, so they were removed from `server.h` and `sblist.h` to
+keep builds warning-free. If you rely on a custom build tool that used those
+directives, restore them or adjust your toolchain accordingly.

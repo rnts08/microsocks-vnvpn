@@ -40,6 +40,7 @@ struct account {
 int db_account_create(const char *username, const char *password, int64_t monthly_bandwidth);
 int db_account_auth(const char *username, const char *password);
 int db_account_update_bandwidth(int account_id, int64_t sent, int64_t received);
+int db_account_update_last_ip(int account_id, const char *client_ip);
 int db_account_check_whitelist(int account_id, union sockaddr_union *addr);
 int db_account_add_whitelist(int account_id, const char *ip);
 

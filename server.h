@@ -8,7 +8,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 
-#pragma RcB2 DEP "server.c"
+/* Removed nonstandard #pragma RcB2 (project-specific build hint). */
 
 union sockaddr_union {
 	struct sockaddr_in  v4;

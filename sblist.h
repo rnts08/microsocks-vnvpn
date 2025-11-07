@@ -87,6 +87,6 @@ size_t sblist_insert_sorted(sblist* l, void* o, int (*compar)(const void *, cons
 }
 #endif
 
-#pragma RcB2 DEP "sblist.c" "sblist_delete.c"
+/* Removed nonstandard #pragma RcB2 (project-specific build hint). */
 
 #endif
