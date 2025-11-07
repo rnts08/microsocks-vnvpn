@@ -35,6 +35,8 @@
 #include <limits.h>
 #include "server.h"
 #include "sblist.h"
+#include "db.h"
+#include <sqlite3.h>
 
 /* timeout in microseconds on resource exhaustion to prevent excessive
    cpu usage. */
@@ -101,7 +103,12 @@ struct thread {
 	pthread_t pt;
 	struct client client;
 	enum socksstate state;
-	volatile int  done;
+	volatile int done;
+	/* Database and accounting fields */
+	int account_id;  /* -1 if not authenticated */
+	char dest[256];
+	size_t bytes_client_to_remote;
+	size_t bytes_remote_to_client;
 };
 
 #ifndef CONFIG_LOG
@@ -125,7 +132,7 @@ static struct addrinfo* addr_choose(struct addrinfo* list, union sockaddr_union*
 	return list;
 }
 
-static int connect_socks_target(unsigned char *buf, size_t n, struct client *client) {
+static int connect_socks_target(unsigned char *buf, size_t n, struct client *client, char *destbuf, size_t destlen) {
 	if(n < 5) return -EC_GENERAL_FAILURE;
 	if(buf[0] != 5) return -EC_GENERAL_FAILURE;
 	if(buf[1] != 1) return -EC_COMMAND_NOT_SUPPORTED; /* we support only CONNECT method */
@@ -158,6 +165,10 @@ static int connect_socks_target(unsigned char *buf, size_t n, struct client *cli
 	}
 	unsigned short port;
 	port = (buf[minlen-2] << 8) | buf[minlen-1];
+	/* populate a human-readable destination for accounting/logging */
+	if(destbuf && destlen) {
+		snprintf(destbuf, destlen, "%s:%u", namebuf, port);
+	}
 	/* there's no suitable errorcode in rfc1928 for dns lookup failure */
 	if(resolve(namebuf, port, &remote)) return -EC_GENERAL_FAILURE;
 	struct addrinfo* raddr = addr_choose(remote, &bind_addr);
@@ -266,7 +277,7 @@ static void send_error(int fd, enum errorcode ec) {
 	write(fd, buf, 10);
 }
 
-static void copyloop(int fd1, int fd2) {
+static void copyloop(int fd1, int fd2, size_t *bytes_fd1_to_fd2, size_t *bytes_fd2_to_fd1) {
 	struct pollfd fds[2] = {
 		[0] = {.fd = fd1, .events = POLLIN},
 		[1] = {.fd = fd2, .events = POLLIN},
@@ -297,10 +308,15 @@ static void copyloop(int fd1, int fd2) {
 			if(m < 0) return;
 			sent += m;
 		}
+		/* update accounting counters */
+		if(bytes_fd1_to_fd2 && bytes_fd2_to_fd1) {
+			if(infd == fd1) *bytes_fd1_to_fd2 += (size_t)n;
+			else *bytes_fd2_to_fd1 += (size_t)n;
+		}
 	}
 }
 
-static enum errorcode check_credentials(unsigned char* buf, size_t n) {
+static enum errorcode check_credentials(unsigned char* buf, size_t n, struct thread *t) {
 	if(n < 5) return EC_GENERAL_FAILURE;
 	if(buf[0] != 1) return EC_GENERAL_FAILURE;
 	unsigned ulen, plen;
@@ -313,7 +329,10 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n) {
 	memcpy(pass, buf+2+ulen+1, plen);
 	user[ulen] = 0;
 	pass[plen] = 0;
-	if(!strcmp(user, auth_user) && !strcmp(pass, auth_pass)) return EC_SUCCESS;
+
+	/* Use database authentication */
+	t->account_id = db_account_auth(user, pass);
+	if(t->account_id >= 0) return EC_SUCCESS;
 	return EC_NOT_ALLOWED;
 }
 
@@ -333,19 +352,25 @@ static int handshake(struct thread *t) {
 				if(am == AM_INVALID) return -1;
 				break;
 			case SS_2_NEED_AUTH:
-				ret = check_credentials(buf, n);
+				ret = check_credentials(buf, n, t);
 				send_auth_response(t->client.fd, 1, ret);
 				if(ret != EC_SUCCESS)
 					return -1;
 				t->state = SS_3_AUTHED;
 				if(auth_ips && !pthread_rwlock_wrlock(&auth_ips_lock)) {
-					if(!is_in_authed_list(&t->client.addr))
+					if(!is_in_authed_list(&t->client.addr)) {
 						add_auth_ip(&t->client.addr);
+						/* Add to database whitelist */
+						char ip[INET6_ADDRSTRLEN];
+						void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+						inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, ip, sizeof(ip));
+						db_account_add_whitelist(t->account_id, ip);
+					}
 					pthread_rwlock_unlock(&auth_ips_lock);
 				}
 				break;
 			case SS_3_AUTHED:
-				ret = connect_socks_target(buf, n, &t->client);
+				ret = connect_socks_target(buf, n, &t->client, t->dest, sizeof t->dest);
 				if(ret < 0) {
 					send_error(t->client.fd, ret*-1);
 					return -1;
@@ -359,11 +384,62 @@ static int handshake(struct thread *t) {
 
 static void* clientthread(void *data) {
 	struct thread *t = data;
+	/* initialize accounting fields */
+	t->bytes_client_to_remote = 0;
+	t->bytes_remote_to_client = 0;
+	t->dest[0] = 0;
+
+	/* Check account bandwidth limits */
+	sqlite3_stmt *stmt;
+	const char *sql = "SELECT monthly_bandwidth, m_bytes_sent + m_bytes_received "
+	                 "FROM accounts WHERE id = ?";
+	if (t->account_id >= 0 && db_stmt_prepare(sql, &stmt) == SQLITE_OK) {
+		sqlite3_bind_int(stmt, 1, t->account_id);
+		if (sqlite3_step(stmt) == SQLITE_ROW) {
+			int64_t limit = sqlite3_column_int64(stmt, 0);
+			int64_t used = sqlite3_column_int64(stmt, 1);
+			sqlite3_finalize(stmt);
+			if (limit > 0 && used >= limit) {
+				if(CONFIG_LOG) {
+					char clientname[256];
+					int af = SOCKADDR_UNION_AF(&t->client.addr);
+					void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+					inet_ntop(af, ipdata, clientname, sizeof clientname);
+					dolog("account: %s -> %s: status=bandwidth_limit_exceeded\n", clientname, "-");
+				}
+				close(t->client.fd);
+				t->done = 1;
+				return NULL;
+			}
+		}
+	}
+
 	int remotefd = handshake(t);
 	if(remotefd != -1) {
-		copyloop(t->client.fd, remotefd);
+		copyloop(t->client.fd, remotefd, &t->bytes_client_to_remote, &t->bytes_remote_to_client);
 		close(remotefd);
+		if(CONFIG_LOG) {
+			char clientname[256];
+			int af = SOCKADDR_UNION_AF(&t->client.addr);
+			void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+			inet_ntop(af, ipdata, clientname, sizeof clientname);
+			dolog("account: %s -> %s: status=success sent=%zu recv=%zu\n",
+				 clientname, t->dest[0] ? t->dest : "-", t->bytes_client_to_remote, t->bytes_remote_to_client);
+		}
+		/* Update bandwidth usage */
+		if(t->account_id >= 0)
+			db_account_update_bandwidth(t->account_id, t->bytes_client_to_remote, t->bytes_remote_to_client);
+	} else {
+		if(CONFIG_LOG) {
+			char clientname[256];
+			int af = SOCKADDR_UNION_AF(&t->client.addr);
+			void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+			inet_ntop(af, ipdata, clientname, sizeof clientname);
+			dolog("account: %s -> %s: status=failed sent=0 recv=0\n",
+				 clientname, t->dest[0] ? t->dest : "-");
+		}
 	}
+
 	close(t->client.fd);
 	t->done = 1;
 	return 0;
@@ -386,7 +462,7 @@ static int usage(void) {
 	dprintf(2,
 		"MicroSocks SOCKS5 Server\n"
 		"------------------------\n"
-		"usage: microsocks -1 -q -i listenip -p port -u user -P pass -b bindaddr -w ips\n"
+		"usage: microsocks -1 -q -i listenip -p port -u user -P pass -b bindaddr -w ips -d dbpath\n"
 		"all arguments are optional.\n"
 		"by default listenip is 0.0.0.0 and port 1080.\n\n"
 		"option -q disables logging.\n"
@@ -414,9 +490,10 @@ static void zero_arg(char *s) {
 int main(int argc, char** argv) {
 	int ch;
 	const char *listenip = "0.0.0.0";
+	const char *dbpath = "microsocks.db";
 	char *p, *q;
 	unsigned port = 1080;
-	while((ch = getopt(argc, argv, ":1qb:i:p:u:P:w:")) != -1) {
+	while((ch = getopt(argc, argv, ":1qb:i:p:u:P:w:d:")) != -1) {
 		switch(ch) {
 			case 'w': /* fall-through */
 			case '1':
@@ -453,6 +530,9 @@ int main(int argc, char** argv) {
 			case 'i':
 				listenip = optarg;
 				break;
+			case 'd':
+				dbpath = optarg;
+				break;
 			case 'p':
 				port = atoi(optarg);
 				break;
@@ -472,6 +552,13 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	signal(SIGPIPE, SIG_IGN);
+
+	/* Initialize SQLite database */
+	if(db_init(dbpath) != SQLITE_OK) {
+		fprintf(stderr, "Failed to initialize database at %s\n", dbpath);
+		return 1;
+	}
+
 	struct server s;
 	sblist *threads = sblist_new(sizeof (struct thread*), 8);
 	if(server_setup(&s, listenip, port)) {
