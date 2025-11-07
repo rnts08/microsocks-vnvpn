@@ -10,6 +10,14 @@
 #include "db.h"
 #include <sodium.h>
 
+/* Password hashing parameters: use MODERATE by default for better security. */
+#ifndef PWHASH_OPSLIMIT
+#define PWHASH_OPSLIMIT crypto_pwhash_OPSLIMIT_MODERATE
+#endif
+#ifndef PWHASH_MEMLIMIT
+#define PWHASH_MEMLIMIT crypto_pwhash_MEMLIMIT_MODERATE
+#endif
+
 static sqlite3 *db = NULL;
 
 /* Schema creation SQL */

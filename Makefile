@@ -3,15 +3,14 @@
 
 prefix = /usr/local
 bindir = $(prefix)/bin
+mandir = $(prefix)/share/man
+docdir = $(prefix)/share/doc/microsocks
 
 PROG = microsocks
-MSADMIN = msadmin
-SRCS = sockssrv.c server.c sblist.c sblist_delete.c db.c
-SRCS_ADMIN = msadmin.c db.c
+SRCS = sockssrv.c server.c sblist.c sblist_delete.c
 OBJS = $(SRCS:.c=.o)
-OBJS_ADMIN = $(SRCS_ADMIN:.c=.o)
 
-LIBS = -lpthread -lsqlite3 -lsodium
+LIBS = -lpthread
 
 CFLAGS += -Wall -std=c99
 
@@ -19,15 +18,20 @@ INSTALL = ./install.sh
 
 -include config.mak
 
-all: $(PROG) $(MSADMIN)
+all: $(PROG)
 
 install: $(PROG)
+	# Install binary
 	$(INSTALL) -D -m 755 $(PROG) $(DESTDIR)$(bindir)/$(PROG)
-	$(INSTALL) -D -m 755 $(MSADMIN) $(DESTDIR)$(bindir)/$(MSADMIN)
+	# Install manpage
+	$(INSTALL) -D -m 644 microsocks.1 $(DESTDIR)$(mandir)/man1/microsocks.1
+	# Install documentation
+	$(INSTALL) -D -m 644 README.md $(DESTDIR)$(docdir)/README.md
+	$(INSTALL) -D -m 644 COPYING $(DESTDIR)$(docdir)/COPYING
 
 clean:
-	rm -f $(PROG) $(MSADMIN)
-	rm -f $(OBJS) $(OBJS_ADMIN)
+	rm -f $(PROG)
+	rm -f $(OBJS)
 
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INC) $(PIC) -c -o $@ $<
@@ -35,8 +39,7 @@ clean:
 $(PROG): $(OBJS)
 	$(CC) $(LDFLAGS) $(OBJS) $(LIBS) -o $@
 
-$(MSADMIN): $(OBJS_ADMIN)
-	$(CC) $(LDFLAGS) $(OBJS_ADMIN) $(LIBS) -o $@
+
 
 .PHONY: all clean install
 

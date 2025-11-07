@@ -4,6 +4,14 @@
 #include <sqlite3.h>
 #include <time.h>
 #include "server.h"
+/* expose libsodium password hashing presets to consumers */
+#include <sodium.h>
+#ifndef PWHASH_OPSLIMIT
+#define PWHASH_OPSLIMIT crypto_pwhash_OPSLIMIT_MODERATE
+#endif
+#ifndef PWHASH_MEMLIMIT
+#define PWHASH_MEMLIMIT crypto_pwhash_MEMLIMIT_MODERATE
+#endif
 
 /* Database initialization and cleanup */
 int db_init(const char *dbpath);

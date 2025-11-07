@@ -1,0 +1,99 @@
+.Dd February 11, 2025
+.Dt MSADMIN 1
+.Os
+.Sh NAME
+.Nm msadmin
+.Nd microsocks account management and migration tool
+.Sh SYNOPSIS
+.Bk -words
+.Bl -tag -width msadmin
+.It Nm
+.Op Fl d Ar dbpath
+.Op Fl c | Fl -csv
+.Ar command
+.Op Ar args...
+.El
+.Ek
+.Sh DESCRIPTION
+.Nm msadmin
+is a command-line tool for managing microsocks user accounts, including creating/updating/deleting accounts,
+checking usage, and migrating passwords from plaintext to Argon2id hashes.
+.Sh COMMANDS
+.Bl -tag -width indent
+.It Cm add Ar username password Op Ar monthly_bandwidth
+Create new account with optional monthly bandwidth limit (in bytes).
+.It Cm list
+List all accounts and their usage (monthly quota, bytes sent/received).
+Use
+.Fl c
+or
+.Fl -csv
+for CSV output.
+.It Cm show Ar username
+Show detailed account information (usage, whitelists, recent connections).
+.It Cm update Ar username Op field value ...
+Update account fields. Available fields:
+.Bl -bullet -compact
+.It
+.Cm password
+.It
+.Cm monthly_bandwidth
+.El
+.It Cm delete Ar username
+Delete an account (prompts for confirmation).
+.It Cm migrate Ar Op db_path Op options Op username...
+Migrate stored passwords from plaintext to Argon2id hashes. Options:
+.Bl -bullet -compact
+.It
+.Cm --only-plaintext
+(default) hash plaintext passwords
+.It
+.Cm --rehash-needs
+report accounts needing rehash
+.It
+.Cm --yes | -y
+non-interactive mode
+.It
+.Cm --log Ar path
+append log to file
+.It
+.Cm --log-dir Ar dir
+create timestamped log file
+.El
+.It Cm benchmark Op Ar N
+Run password hash benchmark (N iterations, default 5).
+.El
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl d Ar dbpath
+Database path (default: microsocks.db).
+.It Fl c | Fl -csv
+Output list command in CSV format.
+.El
+.Sh EXAMPLES
+Create an account:
+.Pp
+.Dl $ msadmin add alice secret123 1000000000
+.Pp
+List accounts (CSV):
+.Pp
+.Dl $ msadmin -c list
+.Pp
+Non-interactive migration with logging:
+.Pp
+.Dl $ msadmin migrate /path/to/db --only-plaintext --yes --log-dir /var/log
+.Sh FILES
+.Bl -tag -width "/usr/local/share/doc/microsocks/MIGRATION.md" -compact
+.It Pa /usr/local/bin/migrate-run
+Migration wrapper script (creates backup)
+.It Pa /usr/local/bin/migrate-smoketest
+Migration smoke test
+.It Pa /usr/local/share/doc/microsocks/MIGRATION.md
+Complete migration documentation
+.El
+.Sh SEE ALSO
+.Xr microsocks 1
+.Sh AUTHORS
+This manual page was written for the
+.Nm
+admin and migration tool.

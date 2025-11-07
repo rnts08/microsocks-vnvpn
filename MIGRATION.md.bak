@@ -22,7 +22,6 @@ If you are upgrading from plaintext passwords to Argon2id hashes (libsodium), fo
    ./msadmin migrate /path/to/microsocks.db --rehash-needs
 
 Notes on parameters:
-
 - The code uses libsodium's crypto_pwhash with the MODERATE preset by default (crypto_pwhash_OPSLIMIT_MODERATE / crypto_pwhash_MEMLIMIT_MODERATE). These are a good balance for small-to-medium servers.
 - For high-security or low-traffic deployments, consider using crypto_pwhash_OPSLIMIT_SENSITIVE / crypto_pwhash_MEMLIMIT_SENSITIVE after benchmarking on your hardware.
 - You can benchmark hashing speed on your machine with:
@@ -30,6 +29,5 @@ Notes on parameters:
   ./msadmin benchmark
 
 Recommended workflow:
-
 - Run the `--rehash-needs` report to list accounts whose stored hashes should be upgraded.
 - Use the application login path, or a scripted rehash, to set new stronger hashes (note: rehash requires plaintext passwords). For bulk migration of plaintext-stored passwords the `--only-plaintext` mode will hash them in-place.

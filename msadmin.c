@@ -5,6 +5,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sodium.h>
+#include <sys/stat.h>
 #include "db.h"
 
 static void print_help(void) {
@@ -20,6 +21,10 @@ static void print_help(void) {
         "    Example: msadmin add john secret123 1000000000\n\n"
         "  list\n"
         "    List all accounts and their usage\n\n"
+            "  migrate [--only-plaintext|--rehash-needs] [--yes|-y] [user...]\n"
+            "    Migrate plaintext passwords to Argon2id hashes or report hashes needing rehash. Defaults to --only-plaintext.\n"
+            "  benchmark [N]\n"
+            "    Run password-hash benchmark (N iterations, default 5)\n"
         "  show username\n"
         "    Show detailed account information\n\n"
         "  update username [field value ...]\n"
@@ -90,6 +95,210 @@ static void list_accounts(int csv_mode) {
     }
 
     sqlite3_finalize(stmt);
+}
+
+static int cmd_migrate(const char *dbpath, int argc, char **argv) {
+    /* Migrate passwords. Modes:
+       --only-plaintext   : Hash stored plaintext passwords (default)
+       --rehash-needs     : Report accounts whose stored hashes need rehash (cannot rehash without plaintext)
+       --yes, -y          : skip confirmation
+       [usernames ...]    : optional list of usernames to restrict migration
+    */
+    int only_plain = 1; /* default */
+    int rehash_needs = 0;
+    int yes = 0;
+    /* collect usernames from args (remaining after options) */
+    const char **users = NULL;
+    int users_count = 0;
+    const char *logpath = NULL;
+    const char *logdir = NULL;
+
+    /* Allow an optional positional DB path as the first argument. If present, use it and shift argv. */
+    if (argc > 0 && argv[0][0] != '-') {
+        /* heuristic: if it contains a slash or ends with .db or the file exists, treat as db path */
+        int looks_like_path = 0;
+        if (strchr(argv[0], '/') != NULL) looks_like_path = 1;
+        if (!looks_like_path && strstr(argv[0], ".db") != NULL) looks_like_path = 1;
+        if (!looks_like_path) {
+            struct stat st;
+            if (stat(argv[0], &st) == 0) looks_like_path = 1;
+        }
+        if (looks_like_path) {
+            dbpath = argv[0];
+            /* shift */
+            argv++; argc--; 
+        }
+    }
+
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--only-plaintext") == 0) { only_plain = 1; rehash_needs = 0; }
+        else if (strcmp(argv[i], "--rehash-needs") == 0) { rehash_needs = 1; only_plain = 0; }
+        else if (strcmp(argv[i], "--yes") == 0 || strcmp(argv[i], "-y") == 0) { yes = 1; }
+        else if (strcmp(argv[i], "--log") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "--log requires a path\n"); return 1; }
+            logpath = argv[++i];
+        } else if (strcmp(argv[i], "--log-dir") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "--log-dir requires a directory path\n"); return 1; }
+            logdir = argv[++i];
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "Unknown migrate option: %s\n", argv[i]);
+            return 1;
+        } else {
+            /* treat as username; collect rest as usernames */
+            users = (const char**)&argv[i];
+            users_count = argc - i;
+            break;
+        }
+    }
+
+    if (!yes) {
+        printf("About to run migration on DB: %s\n", dbpath);
+        if (users_count > 0) {
+            printf("Restricted to %d usernames.\n", users_count);
+        } else {
+            printf("Operating on all accounts.\n");
+        }
+        printf("Mode: %s\n", rehash_needs ? "rehash-needs (report only)" : "only-plaintext (hash plaintext to Argon2id)");
+        printf("Proceed? (yes/no): ");
+        char yn[8];
+        if (!fgets(yn, sizeof yn, stdin)) return 1;
+        if (strncmp(yn, "yes", 3) != 0) { printf("Aborted.\n"); return 1; }
+    }
+
+    /* open log file if requested */
+    FILE *logf = NULL;
+    char auto_logpath[PATH_MAX];
+    if (logpath == NULL && logdir != NULL) {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        char ts[64];
+        strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
+        snprintf(auto_logpath, sizeof(auto_logpath), "%s/migrate-%s.log", logdir, ts);
+        logpath = auto_logpath;
+    }
+    if (logpath) {
+        logf = fopen(logpath, "a");
+        if (!logf) {
+            fprintf(stderr, "Failed to open log file %s\n", logpath);
+            return 1;
+        }
+        time_t now = time(NULL);
+        char tbuf[64];
+        struct tm tm2;
+        localtime_r(&now, &tm2);
+        strftime(tbuf, sizeof tbuf, "%Y-%m-%d %H:%M:%S", &tm2);
+        fprintf(logf, "migration run: %s DB=%s mode=%s\n", tbuf, dbpath, rehash_needs ? "rehash-needs" : "only-plaintext");
+        if (users_count > 0) {
+            fprintf(logf, "restricted to %d usernames\n", users_count);
+        }
+        fflush(logf);
+    }
+
+    if (db_init(dbpath) != SQLITE_OK) {
+        fprintf(stderr, "failed to open db %s\n", dbpath);
+        return 1;
+    }
+    sqlite3 *h = db_get_handle();
+    const char *sel = "SELECT id, username, password FROM accounts";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(h, sel, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "prepare failed: %s\n", sqlite3_errmsg(h));
+        db_cleanup();
+        return 1;
+    }
+    const char *upd_sql = "UPDATE accounts SET password = ? WHERE id = ?";
+    sqlite3_stmt *upd = NULL;
+    if (only_plain) {
+        if (sqlite3_prepare_v2(h, upd_sql, -1, &upd, NULL) != SQLITE_OK) {
+            fprintf(stderr, "prepare update failed: %s\n", sqlite3_errmsg(h));
+            sqlite3_finalize(stmt);
+            db_cleanup();
+            return 1;
+        }
+    }
+
+    int migrated = 0;
+    int reported = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int id = sqlite3_column_int(stmt, 0);
+        const unsigned char *username = sqlite3_column_text(stmt, 1);
+        const unsigned char *pw = sqlite3_column_text(stmt, 2);
+        if (!pw) continue;
+        const char *pwstr = (const char*)pw;
+        const char *uname = username ? (const char*)username : "(null)";
+
+        /* if specific users provided, skip others */
+        if (users_count > 0) {
+            int match = 0;
+            for (int u = 0; u < users_count; u++) if (strcmp(uname, users[u]) == 0) { match = 1; break; }
+            if (!match) continue;
+        }
+
+        if (only_plain) {
+            if (strncmp(pwstr, "$argon2id$", 9) == 0) continue; /* already hashed */
+            char newhash[crypto_pwhash_STRBYTES];
+            if (crypto_pwhash_str(newhash, pwstr, strlen(pwstr), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
+                fprintf(stderr, "failed to hash password for id=%d user=%s\n", id, uname);
+                if (logf) fprintf(logf, "error: failed to hash id=%d user=%s\n", id, uname);
+                continue;
+            }
+            sqlite3_reset(upd);
+            sqlite3_bind_text(upd, 1, newhash, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(upd, 2, id);
+            if (sqlite3_step(upd) != SQLITE_DONE) {
+                fprintf(stderr, "failed to update password for id=%d: %s\n", id, sqlite3_errmsg(h));
+                if (logf) fprintf(logf, "error: failed to update id=%d user=%s: %s\n", id, uname, sqlite3_errmsg(h));
+            } else {
+                migrated++;
+                printf("migrated: id=%d user=%s\n", id, uname);
+                if (logf) fprintf(logf, "migrated: id=%d user=%s\n", id, uname);
+            }
+        } else if (rehash_needs) {
+            /* only report accounts that have Argon2 hashes and need rehash according to new params */
+            if (strncmp(pwstr, "$argon2id$", 9) != 0) continue; /* cannot determine needs-rehash for plaintext */
+            if (crypto_pwhash_str_needs_rehash(pwstr, PWHASH_OPSLIMIT, PWHASH_MEMLIMIT)) {
+                reported++;
+                printf("needs_rehash: id=%d user=%s\n", id, uname);
+                if (logf) fprintf(logf, "needs_rehash: id=%d user=%s\n", id, uname);
+            }
+        }
+    }
+    if (only_plain && upd) sqlite3_finalize(upd);
+    sqlite3_finalize(stmt);
+    db_cleanup();
+    if (only_plain) printf("migration completed, migrated %d accounts\n", migrated);
+    if (only_plain && logf) fprintf(logf, "migration completed, migrated %d accounts\n", migrated);
+    if (rehash_needs) printf("rehash report completed, %d accounts need rehash\n", reported);
+    if (rehash_needs && logf) fprintf(logf, "rehash report completed, %d accounts need rehash\n", reported);
+    if (logf) fclose(logf);
+    return 0;
+}
+
+static int cmd_benchmark(const char *dbpath, int argc, char **argv) {
+    int iterations = 5;
+    if (argc >= 1) iterations = atoi(argv[0]);
+    const char *pw = "benchmark-password";
+    struct timespec t0, t1;
+    if (clock_gettime(CLOCK_MONOTONIC, &t0) != 0) {
+        perror("clock_gettime");
+        return 1;
+    }
+    for (int i = 0; i < iterations; i++) {
+        char hashed[crypto_pwhash_STRBYTES];
+        if (crypto_pwhash_str(hashed, pw, strlen(pw), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
+            fprintf(stderr, "hash failed at iteration %d\n", i);
+            return 1;
+        }
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &t1) != 0) {
+        perror("clock_gettime");
+        return 1;
+    }
+    double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec)/1e9;
+    printf("Performed %d hashes in %.3f s (avg %.3f s/hash) with ops=%llu mem=%zu\n",
+           iterations, elapsed, elapsed/iterations, (unsigned long long)PWHASH_OPSLIMIT, (size_t)PWHASH_MEMLIMIT);
+    return 0;
 }
 
 static void show_account(const char *username) {
@@ -315,6 +524,12 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "list") == 0) {
         list_accounts(csv_mode);
+    }
+    else if (strcmp(cmd, "migrate") == 0) {
+        rc = cmd_migrate(dbpath, argc - arg, argv + arg);
+    }
+    else if (strcmp(cmd, "benchmark") == 0) {
+        rc = cmd_benchmark(dbpath, argc - arg, argv + arg);
     }
     else if (strcmp(cmd, "show") == 0) {
         if (arg >= argc) {
