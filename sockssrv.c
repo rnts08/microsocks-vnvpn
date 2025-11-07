@@ -37,6 +37,11 @@
 #include "sblist.h"
 #include "db.h"
 #include <sqlite3.h>
+#include <stdbool.h>
+#include <libgen.h>
+#include <limits.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 /* timeout in microseconds on resource exhaustion to prevent excessive
    cpu usage. */
@@ -69,6 +74,89 @@
 static int quiet;
 static const struct server* server;
 static union sockaddr_union bind_addr = {.v4.sin_family = AF_UNSPEC};
+
+/* Configuration structure */
+struct cfg {
+	int quiet; /* 0 = verbose, 1 = quiet */
+	char listenip[128];
+	unsigned port;
+	char dbpath[PATH_MAX];
+	char logfile[PATH_MAX];
+};
+
+/* Helper: trim whitespace in place */
+static char *trim(char *s) {
+	if(!s) return s;
+	while(*s && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) s++;
+	if(*s == '\0') return s;
+	char *end = s + strlen(s) - 1;
+	while(end > s && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) *end-- = '\0';
+	return s;
+}
+
+/* parse boolean-ish values */
+static int parse_bool(const char *v) {
+	if(!v) return 0;
+	if(strcmp(v, "1") == 0) return 1;
+	if(strcasecmp(v, "true") == 0) return 1;
+	if(strcasecmp(v, "yes") == 0) return 1;
+	return 0;
+}
+
+/* Read a simple ini-style file with lines key = value (no sections). */
+static void read_config_file(const char *path, struct cfg *cfg) {
+	FILE *f = fopen(path, "r");
+	if(!f) return; /* silently ignore if not present */
+	char line[512];
+	while(fgets(line, sizeof line, f)) {
+		char *p = line;
+		/* skip comments and empty lines */
+		while(*p == ' ' || *p == '\t') p++;
+		if(*p == '\0' || *p == '\n' || *p == '#' || *p == ';') continue;
+		char *eq = strchr(p, '=');
+		if(!eq) continue;
+		*eq = '\0';
+		char *key = trim(p);
+		char *val = trim(eq + 1);
+		/* remove inline comments */
+		char *cpos = strpbrk(val, "#;");
+		if(cpos) *cpos = '\0';
+		val = trim(val);
+		if(strcasecmp(key, "quiet") == 0) {
+			cfg->quiet = parse_bool(val);
+		} else if(strcasecmp(key, "listen") == 0) {
+			strncpy(cfg->listenip, val, sizeof(cfg->listenip)-1);
+			cfg->listenip[sizeof(cfg->listenip)-1] = '\0';
+		} else if(strcasecmp(key, "port") == 0) {
+			cfg->port = (unsigned)atoi(val);
+        } else if(strcasecmp(key, "database") == 0) {
+            strncpy(cfg->dbpath, val, sizeof(cfg->dbpath)-1);
+            cfg->dbpath[sizeof(cfg->dbpath)-1] = '\0';
+        } else if(strcasecmp(key, "logfile") == 0) {
+            strncpy(cfg->logfile, val, sizeof(cfg->logfile)-1);
+            cfg->logfile[sizeof(cfg->logfile)-1] = '\0';
+        }
+    }
+    fclose(f);
+}/* Determine default DB path: directory of binary + /microsocks.db. */
+static void default_dbpath(char *out, size_t olen) {
+	char exe[PATH_MAX] = {0};
+	ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe)-1);
+	if(n <= 0) {
+		/* fallback to ./microsocks.db */
+		strncpy(out, "microsocks.db", olen-1);
+		out[olen-1] = '\0';
+		return;
+	}
+	exe[n] = '\0';
+	/* dirname may modify input, copy */
+	char dir[PATH_MAX];
+	strncpy(dir, exe, sizeof(dir)-1);
+	dir[sizeof(dir)-1] = '\0';
+	char *d = dirname(dir);
+	if(!d) strncpy(out, "microsocks.db", olen-1);
+	else snprintf(out, olen, "%s/microsocks.db", d);
+}
 
 enum socksstate {
 	SS_1_CONNECTED,
@@ -111,10 +199,43 @@ struct thread {
 #define CONFIG_LOG 1
 #endif
 #if CONFIG_LOG
-/* we log to stderr because it's not using line buffering, i.e. malloc which would need
-   locking when called from different threads. for the same reason we use dprintf,
-   which writes directly to an fd. */
-#define dolog(...) do { if(!quiet) dprintf(2, __VA_ARGS__); } while(0)
+/* we log to a configurable fd (default stderr=2). dprintf is used so we avoid
+   heap allocations from printf inside threads. */
+static int logfd = 2;
+static char logfile_path[PATH_MAX] = "";
+
+/* Reopen logfile (for rotation) */
+static void reopen_logfile(void) {
+    if(!logfile_path[0]) return; /* using stderr */
+    
+    /* Try to open in append mode */
+    int new_fd = open(logfile_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if(new_fd == -1) {
+        /* On failure, log to stderr and continue */
+        dprintf(2, "Failed to open logfile %s: %s. Falling back to stderr.\n",
+                logfile_path, strerror(errno));
+        if(logfd != 2) close(logfd);
+        logfd = 2;
+        return;
+    }
+    
+    /* Success - swap the fd */
+    if(logfd != 2) close(logfd);
+    logfd = new_fd;
+}
+
+/* Thread-safe logging with automatic fallback */
+#define dolog(...) do { \
+    if(!quiet) { \
+        if(dprintf(logfd, __VA_ARGS__) < 0) { \
+            /* On write failure, try to reopen once */ \
+            reopen_logfile(); \
+            /* Second attempt, this time to wherever logfd points */ \
+            dprintf(logfd, __VA_ARGS__); \
+        } \
+    } \
+} while(0)
+
 #else
 static void dolog(const char* fmt, ...) { }
 #endif
@@ -475,20 +596,50 @@ static void collect(sblist *threads) {
 	}
 }
 
+/* Print effective configuration and exit */
+static void print_config(const struct cfg *cfg) {
+	printf("MicroSocks Configuration:\n"
+		   "------------------\n"
+		   "listen = %s\n"
+		   "port = %u\n"
+		   "quiet = %s\n"
+		   "database = %s\n"
+		   "logfile = %s\n",
+		   cfg->listenip,
+		   cfg->port,
+		   cfg->quiet ? "true" : "false",
+		   cfg->dbpath,
+		   cfg->logfile[0] ? cfg->logfile : "(stderr)");
+	exit(0);
+}
+
 static int usage(void) {
 	dprintf(2,
 		"MicroSocks SOCKS5 Server\n"
 		"------------------------\n"
-		"usage: microsocks -q -i listenip -p port -b bindaddr -d dbpath\n"
-		"all arguments are optional.\n"
-		"by default listenip is 0.0.0.0 and port 1080.\n\n"
-		"option -q disables logging.\n"
-		"option -b specifies which ip outgoing connections are bound to\n"
-		"option -d specifies the path to the SQLite database (default: microsocks.db)\n"
+		"usage: microsocks [-f config] [-q] [-i listenip] [-p port] [-b bindaddr] [-d dbpath] [--print-config]\n"
+		"\n"
+		"Configuration: you can provide an INI-style config file (default: ./microsocks.conf)\n"
+		"via -f. The file supports simple key = value pairs (no sections):\n"
+		"  quiet    = true|false    (disable logging)\n"
+		"  listen   = <ip>          (listen address, e.g. 0.0.0.0)\n"
+		"  port     = <port>        (listen port, e.g. 1080)\n"
+		"  database = <path>        (sqlite DB path)\n"
+		"\n"
+		"CLI flags override values in the config file. If no config is found, sane\n"
+		"defaults are used: quiet=false, listen=0.0.0.0, port=1080, database is\n"
+		"microsocks.db next to the server binary (fallback ./microsocks.db).\n"
+		"\n"
+		"option -f specifies a config file path (INI-style).\n"
+		"option -q disables logging (overrides config quiet).\n"
+		"option -b specifies which ip outgoing connections are bound to.\n"
+		"option -i specifies the listen ip (overrides config listen).\n"
+		"option -p specifies the port (overrides config port).\n"
+		"option -d specifies the path to the SQLite database (overrides config database).\n"
 		"\n"
 		"Authentication is handled by the database. Create accounts with enabled=1\n"
-		"and optionally set a whitelist of IPs in the accounts table.\n"
-		"An empty whitelist allows connections from any IP address.\n"
+		"and optionally set a whitelist of IPs in the accounts table. An empty\n"
+		"whitelist allows connections from any IP address.\n"
 	);
 	return 1;
 }
@@ -499,11 +650,74 @@ static int usage(void) {
 
 int main(int argc, char** argv) {
 	int ch;
-	const char *listenip = "0.0.0.0";
-	const char *dbpath = "microsocks.db";
-	unsigned port = 1080;
-	while((ch = getopt(argc, argv, ":qb:i:p:d:")) != -1) {
+	/* config handling */
+	char config_path[PATH_MAX];
+	/* default config file in /etc/microsocks */
+	strncpy(config_path, "/etc/microsocks/microsocks.conf", sizeof(config_path)-1);
+	config_path[sizeof(config_path)-1] = '\0';
+
+	/* quick scan for -f to allow early config override (supports "-fpath" and "-f path") */
+	for(int i=1;i<argc;i++) {
+		if(strcmp(argv[i], "-f") == 0 && i+1 < argc) {
+			strncpy(config_path, argv[i+1], sizeof(config_path)-1);
+			config_path[sizeof(config_path)-1] = '\0';
+			break;
+		} else if(strncmp(argv[i], "-f", 2) == 0 && argv[i][2] != '\0') {
+			strncpy(config_path, argv[i]+2, sizeof(config_path)-1);
+			config_path[sizeof(config_path)-1] = '\0';
+			break;
+		}
+	}
+
+	struct cfg cfg;
+	/* set sane defaults */
+	cfg.quiet = 0; /* default: not quiet */
+	strncpy(cfg.listenip, "0.0.0.0", sizeof(cfg.listenip)-1);
+	cfg.listenip[sizeof(cfg.listenip)-1] = '\0';
+	cfg.port = 1080;
+	cfg.logfile[0] = '\0';
+	default_dbpath(cfg.dbpath, sizeof(cfg.dbpath));
+
+	/* read config file if present */
+	read_config_file(config_path, &cfg);
+
+	/* apply config to runtime vars (can be overridden by CLI below) */
+	quiet = cfg.quiet;
+	char listenip_buf[128];
+	strncpy(listenip_buf, cfg.listenip, sizeof(listenip_buf)-1);
+	listenip_buf[sizeof(listenip_buf)-1] = '\0';
+	char dbpath[PATH_MAX];
+	strncpy(dbpath, cfg.dbpath, sizeof(dbpath)-1);
+	dbpath[sizeof(dbpath)-1] = '\0';
+	unsigned port = cfg.port;
+	char logfile_cli[PATH_MAX] = "";
+
+	/* parse CLI (overrides config). -f accepted and will re-read file. */
+	optind = 1;
+	
+	/* Handle --print-config option first */
+	for(int i=1; i<argc; i++) {
+		if(strcmp(argv[i], "--print-config") == 0) {
+			print_config(&cfg);
+			/* never returns */
+		}
+	}
+	
+	while((ch = getopt(argc, argv, ":f:qb:i:p:d:L:")) != -1) {
 		switch(ch) {
+		case 'f':
+				strncpy(config_path, optarg, sizeof(config_path)-1);
+				config_path[sizeof(config_path)-1] = '\0';
+				/* re-read */
+				read_config_file(config_path, &cfg);
+				/* re-apply */
+				quiet = cfg.quiet;
+				strncpy(listenip_buf, cfg.listenip, sizeof(listenip_buf)-1);
+				listenip_buf[sizeof(listenip_buf)-1] = '\0';
+				strncpy(dbpath, cfg.dbpath, sizeof(dbpath)-1);
+				dbpath[sizeof(dbpath)-1] = '\0';
+				port = cfg.port;
+				break;
 			case 'q':
 				quiet = 1;
 				break;
@@ -511,22 +725,72 @@ int main(int argc, char** argv) {
 				resolve_sa(optarg, 0, &bind_addr);
 				break;
 			case 'i':
-				listenip = optarg;
+				strncpy(listenip_buf, optarg, sizeof(listenip_buf)-1);
+				listenip_buf[sizeof(listenip_buf)-1] = '\0';
 				break;
 			case 'd':
-				dbpath = optarg;
+				strncpy(dbpath, optarg, sizeof(dbpath)-1);
+				dbpath[sizeof(dbpath)-1] = '\0';
 				break;
-			case 'p':
-				port = atoi(optarg);
-				break;
-			case ':':
-				dprintf(2, "error: option -%c requires an operand\n", optopt);
-				/* fall through */
-			case '?':
-				return usage();
+		case 'p':
+			port = (unsigned)atoi(optarg);
+			break;
+		case 'L':
+			strncpy(logfile_cli, optarg, sizeof(logfile_cli)-1);
+			logfile_cli[sizeof(logfile_cli)-1] = '\0';
+			break;
+		case ':':
+			dprintf(2, "error: option -%c requires an operand\n", optopt);
+			/* fall through */
+		case '?':
+			return usage();
 		}
 	}
+	const char *listenip = listenip_buf;
+	
+	/* Setup signal handlers */
 	signal(SIGPIPE, SIG_IGN);
+	signal(SIGHUP, reopen_logfile); /* Handle logfile rotation */
+
+	/* Validate config values */
+	if(port == 0 || port > 65535) {
+		fprintf(stderr, "invalid port value: %u\n", port);
+		return 1;
+	}
+	{
+		struct addrinfo *ainfo = NULL;
+		if(resolve(listenip, port, &ainfo) != 0) {
+			fprintf(stderr, "invalid listen address: %s\n", listenip);
+			return 1;
+		}
+		if(ainfo) freeaddrinfo(ainfo);
+	}
+	if(!dbpath[0]) {
+		fprintf(stderr, "invalid database path\n");
+		return 1;
+	}
+
+	/* Setup logfile if requested (CLI overrides config) */
+	if(logfile_cli[0]) strncpy(cfg.logfile, logfile_cli, sizeof(cfg.logfile)-1);
+	if(cfg.logfile[0]) {
+		int fd = open(cfg.logfile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		if(fd == -1) {
+			perror("opening logfile");
+			return 1;
+		}
+		logfd = fd;
+		strncpy(logfile_path, cfg.logfile, sizeof(logfile_path)-1);
+		logfile_path[sizeof(logfile_path)-1] = '\0';
+	} else {
+		logfd = 2; /* stderr */
+		logfile_path[0] = '\0';
+	}
+
+	/* Print effective configuration (if not quiet) */
+	if(!quiet) {
+		dolog("starting microsocks: listen=%s port=%u db=%s logfile=%s\n",
+			listenip, port, dbpath, logfile_path[0] ? logfile_path : "stderr");
+	}
 
 	/* Initialize SQLite database */
 	if(db_init(dbpath) != SQLITE_OK) {

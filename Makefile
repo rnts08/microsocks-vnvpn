@@ -33,6 +33,8 @@ install: $(PROG) $(MSADMIN)
 	# Install documentation
 	$(INSTALL) -D -m 644 README.md $(DESTDIR)$(docdir)/README.md
 	$(INSTALL) -D -m 644 COPYING $(DESTDIR)$(docdir)/COPYING
+	# Install configuration
+	$(INSTALL) -D -m 644 microsocks.conf $(DESTDIR)$(prefix)/etc/microsocks/microsocks.conf
 
 clean:
 	rm -f $(PROG)

@@ -8,12 +8,14 @@
 .Bk -words
 .Bl -tag -width microsocks
 .It Nm
+.Op Fl f Ar config
 .Op Fl q
 .Op Fl b Ar ip
 .Op Fl i Ar addr
 .Op Fl p Ar port
-.Op Fl w Ar ips
+.Op Fl L Ar logfile
 .Op Fl d Ar dbpath
+.Op Fl -print-config
 .Oc
 .El
 .Ek
@@ -46,12 +48,12 @@ TCP port to listen to. Default to
 .Cm 1080 .
 .It Fl q
 Quiet mode: suppress logging messages.
-.It Fl w
-A comma-separated whitelist of IP addresses that may use the proxy without
-database authentication. e.g.
-.Cm -w 127.0.0.1,192.168.1.100,::1
-or just
-.Cm -w 10.0.0.1 .
+.It Fl f Ar config
+Path to an INI-style configuration file. Default: /etc/microsocks/microsocks.conf. CLI flags override values in the config file.
+.It Fl -print-config
+Print the effective configuration including defaults and exit.
+.It Fl L Ar logfile
+Path to a logfile. By default logs are written to stderr. If specified, all logs are appended to the file.
 .It Fl d Ar dbpath
 Database path (default: microsocks.db).
 .El
