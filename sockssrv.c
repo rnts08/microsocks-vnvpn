@@ -204,8 +204,11 @@ struct thread {
 static int logfd = 2;
 static char logfile_path[PATH_MAX] = "";
 
-/* Reopen logfile (for rotation) */
-static void reopen_logfile(void) {
+/* Reopen logfile (for rotation)
+ * Signal handlers must use the signature void handler(int). We accept the
+ * argument but ignore it when called directly (pass 0).
+ */
+static void reopen_logfile(int sig) {
     if(!logfile_path[0]) return; /* using stderr */
     
     /* Try to open in append mode */
@@ -228,8 +231,8 @@ static void reopen_logfile(void) {
 #define dolog(...) do { \
     if(!quiet) { \
         if(dprintf(logfd, __VA_ARGS__) < 0) { \
-            /* On write failure, try to reopen once */ \
-            reopen_logfile(); \
+			/* On write failure, try to reopen once (call handler form with 0) */ \
+			reopen_logfile(0); \
             /* Second attempt, this time to wherever logfd points */ \
             dprintf(logfd, __VA_ARGS__); \
         } \
@@ -619,7 +622,7 @@ static int usage(void) {
 		"------------------------\n"
 		"usage: microsocks [-f config] [-q] [-i listenip] [-p port] [-b bindaddr] [-d dbpath] [--print-config]\n"
 		"\n"
-		"Configuration: you can provide an INI-style config file (default: ./microsocks.conf)\n"
+		"Configuration: you can provide an INI-style config file (default: /etc/microsocks/microsocks.conf)\n"
 		"via -f. The file supports simple key = value pairs (no sections):\n"
 		"  quiet    = true|false    (disable logging)\n"
 		"  listen   = <ip>          (listen address, e.g. 0.0.0.0)\n"
