@@ -1,27 +1,221 @@
 {% extends 'base.html' %}
 {% block content %}
-  <h2>Account: {{ row['username'] }}</h2>
-  <p><strong>Created:</strong> {{ row['created'] }} &nbsp; <strong>Updated:</strong> {{ row['updated'] }} &nbsp; <strong>Last Seen:</strong> {{ row['last_seen'] or 'never' }}</p>
-  <p><strong>Monthly Bandwidth:</strong> {% if row['monthly_bandwidth'] and row['monthly_bandwidth'] > 0 %}{{ row['monthly_bandwidth']|bytes_to_gb }}{% else %}unlimited{% endif %}</p>
-  <p><strong>Monthly Usage:</strong> {{ row['m_bytes_sent']|human_readable }} sent, {{ row['m_bytes_received']|human_readable }} received</p>
-  <p><strong>Total Usage:</strong> {{ row['total_bytes_sent']|human_readable }} sent, {{ row['total_bytes_received']|human_readable }} received</p>
-  <p><strong>Current Connections:</strong> {{ row['online'] }}</p>
-  <p><strong>Whitelisted IPs:</strong> {{ row['whitelist'] or 'none' }}</p>
-  <h3>Recent Connections</h3>
-  <table>
-    <thead><tr><th>Timestamp</th><th>Client IP</th><th>Destination</th><th>Status</th><th>Transfer</th></tr></thead>
-    <tbody>
-      {% for c in conns %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="mb-0">Account: {{ row.username }}</h2>
+    <div>
+      <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Back to list</a>
+      <a href="{{ url_for('update_user', username=row.username) }}" class="btn btn-outline-primary btn-sm">Edit</a>
+      <a href="{{ url_for('delete_user', username=row.username) }}" class="btn btn-outline-danger btn-sm">Delete</a>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-body">
+      <p><strong>Created:</strong> {{ row.created }}
+         &nbsp; <strong>Updated:</strong> {{ row.updated }}
+         &nbsp; <strong>Last Seen:</strong> {{ row.last_seen or 'never' }}</p>
+
+      <p><strong>Monthly Bandwidth:</strong>
+        {% if row.monthly_bandwidth and row.monthly_bandwidth > 0 %}
+          {{ row.monthly_bandwidth | bytes_to_gb }}
+        {% else %}
+          unlimited
+        {% endif %}
+      </p>
+
+      <p><strong>Monthly Usage:</strong>
+        {{ row.m_bytes_sent | human_readable }} sent,
+        {{ row.m_bytes_received | human_readable }} received
+      </p>
+
+      <p><strong>Total Usage:</strong>
+        {{ row.total_bytes_sent | human_readable }} sent,
+        {{ row.total_bytes_received | human_readable }} received
+      </p>
+
+      <p><strong>Current Connections:</strong> {{ row.online }}</p>
+
+      <p><strong>Whitelisted IPs:</strong>
+        {% if row.whitelist %}
+          <code>{{ row.whitelist }}</code>
+        {% else %}
+          <span class="text-muted">none</span>
+        {% endif %}
+      </p>
+    </div>
+  </div>
+
+  <h3 class="mb-3">Recent Connections</h3>
+  <div class="table-responsive mb-4">
+    <table class="table table-striped table-hover align-middle">
+      <thead class="table-dark">
         <tr>
-          <td>{{ c['ts'] }}</td>
-          <td>{{ c['client_ip'] }}</td>
-          <td>{{ c['destination'] }}</td>
-          <td>{{ c['status'] }}</td>
-          <td>{{ c['bytes_sent']|human_readable }}/{{ c['bytes_received']|human_readable }}</td>
+          <th>Timestamp</th>
+          <th>Client IP</th>
+          <th>Destination</th>
+          <th>Status</th>
+          <th>Transfer</th>
         </tr>
-      {% endfor %}
-      {% if not conns %}<tr><td colspan="5" class="muted">No recent connections</td></tr>{% endif %}
-    </tbody>
-  </table>
-  <p><a href="{{ url_for('index') }}">Back</a> |<a href="{{ url_for('update_user', username=row['username']) }}">Edit</a> | <a href="{{ url_for('delete_user', username=row['username']) }}">Delete</a></p>
+      </thead>
+      <tbody>
+        {% for c in conns %}
+          <tr>
+            <td>{{ c.ts }}</td>
+            <td>{{ c.client_ip }}</td>
+            <td>{{ c.destination }}</td>
+            <td>
+              {% if c.status == 'active' %}
+                <span class="badge bg-success">active</span>
+              {% elif c.status == 'success' %}
+                <span class="badge bg-success">success</span>          
+              {% elif c.status == 'closed' %}
+                <span class="badge bg-secondary">closed</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">{{ c.status }}</span>
+              {% endif %}
+            </td>
+            <td>{{ c.bytes_sent | human_readable }} / {{ c.bytes_received | human_readable }}</td>
+          </tr>
+        {% endfor %}
+        {% if not conns %}
+          <tr><td colspan="5" class="text-muted text-center">No recent connections</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+<h3 class="mb-3">Bandwidth Usage Over Time</h3>
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div class="text-muted small">Shows total data transferred (sent + received) per day.</div>
+      <div>
+        <select id="rangeSelector" class="form-select form-select-sm w-auto">
+          <option value="7d">Last 7 days</option>
+          <option value="30d" selected>Last 30 days</option>
+          <option value="all">All time</option>
+        </select>
+      </div>
+    </div>
+    <canvas id="usageChart" height="120"></canvas>
+  </div>
+</div>
+
+
+
+  <div class="text-end">
+    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Back to list</a>
+    <a href="{{ url_for('update_user', username=row.username) }}" class="btn btn-outline-primary">Edit</a>
+    <a href="{{ url_for('delete_user', username=row.username) }}" class="btn btn-outline-danger">Delete</a>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  const ctx = document.getElementById('usageChart');
+  let usageChart = null;
+
+  function humanReadable(value) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = value;
+    let unit = units[0];
+    for (let i = 0; i < units.length - 1 && size >= 1000; i++) {
+      size /= 1000;
+      unit = units[i + 1];
+    }
+    return { value: size, unit };
+  }
+
+  async function fetchUsageData(range = '30d') {
+    const url = "{{ url_for('user_usage_json', username=row.username) }}?range=" + range;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Failed to fetch usage data');
+    return await res.json();
+  }
+
+  async function renderUsageChart(range = '30d') {
+    const data = await fetchUsageData(range);
+    const labels = data.labels;
+    const sent = data.sent;
+    const received = data.received;
+    const total = data.total;
+
+    // Auto determine best display unit (B, KB, MB, GB, TB)
+    const maxValue = Math.max(...total);
+    const { value: dummy, unit } = humanReadable(maxValue);
+    const scale = { 'B': 1, 'KB': 1e3, 'MB': 1e6, 'GB': 1e9, 'TB': 1e12 }[unit];
+
+    const sentScaled = sent.map(v => v / scale);
+    const recvScaled = received.map(v => v / scale);
+    const totalScaled = total.map(v => v / scale);
+
+    // Destroy existing chart if present
+    if (usageChart) usageChart.destroy();
+
+    usageChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: 'Sent (' + unit + ')',
+            data: sentScaled,
+            borderColor: 'rgba(220,53,69,0.9)',
+            backgroundColor: 'rgba(220,53,69,0.2)',
+            fill: false,
+            borderWidth: 2,
+            tension: 0.3,
+            pointRadius: 3
+          },
+          {
+            label: 'Received (' + unit + ')',
+            data: recvScaled,
+            borderColor: 'rgba(13,110,253,0.9)',
+            backgroundColor: 'rgba(13,110,253,0.2)',
+            fill: false,
+            borderWidth: 2,
+            tension: 0.3,
+            pointRadius: 3
+          },
+          {
+            label: 'Total (' + unit + ')',
+            data: totalScaled,
+            borderColor: 'rgba(25,135,84,0.9)',
+            backgroundColor: 'rgba(25,135,84,0.2)',
+            borderDash: [5,5],
+            fill: false,
+            borderWidth: 2,
+            tension: 0.3,
+            pointRadius: 2
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: {
+            callbacks: {
+              label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' ' + unit
+            }
+          }
+        },
+        scales: {
+          x: { title: { display: true, text: 'Date' } },
+          y: {
+            title: { display: true, text: 'Data (' + unit + ')' },
+            beginAtZero: true
+          }
+        }
+      }
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const selector = document.getElementById('rangeSelector');
+    selector.addEventListener('change', () => renderUsageChart(selector.value));
+    renderUsageChart('30d');
+  });
+</script>
+
 {% endblock %}

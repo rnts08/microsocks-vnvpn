@@ -140,7 +140,7 @@ def verify_password(stored: str, provided: str) -> bool:
 def index():
     # list users
     db = get_db()
-    cur = db.execute('''SELECT username, monthly_bandwidth, m_bytes_sent, m_bytes_received, total_bytes_sent, total_bytes_received, online, datetime(ts_seen,'unixepoch') as last_seen FROM accounts ORDER BY username''')
+    cur = db.execute('''SELECT username, monthly_bandwidth, m_bytes_sent, m_bytes_received, total_bytes_sent, total_bytes_received, online, datetime(ts_seen,'unixepoch') as last_seen, last_client_ip AS last_ip FROM accounts ORDER BY username''')
     rows = cur.fetchall()
     if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
         users = []
@@ -152,6 +152,7 @@ def index():
                 'total_used': (r['total_bytes_sent'] + r['total_bytes_received']),
                 'online': r['online'],
                 'last_seen': r['last_seen'],
+                'last_ip': r['last_ip']
             })
         return jsonify(users)
     return render_template('list.html', rows=rows)
@@ -178,6 +179,39 @@ def show_user(username):
 
     return render_template('show.html', row=row, conns=conns)
 
+@app.route('/user/<username>/usage.json')
+def user_usage_json(username):
+    db = get_db()
+
+    # Determine time range
+    range_param = request.args.get('range', '30d')
+    now = int(time.time())
+    if range_param == '7d':
+        since = now - 7 * 24 * 3600
+    elif range_param == '30d':
+        since = now - 30 * 24 * 3600
+    else:
+        since = 0  # all time
+
+    cur = db.execute('''
+        SELECT date(datetime(c.ts_timestamp, 'unixepoch')) AS day,
+               SUM(c.bytes_sent) AS sent,
+               SUM(c.bytes_received) AS received
+        FROM connections AS c
+        JOIN accounts AS a ON c.account_id = a.id
+        WHERE a.username = ?
+          AND c.ts_timestamp >= ?
+        GROUP BY day
+        ORDER BY day ASC
+    ''', (username, since))
+
+    data = cur.fetchall()
+    labels = [row['day'] for row in data]
+    sent = [row['sent'] or 0 for row in data]
+    received = [row['received'] or 0 for row in data]
+    total = [s + r for s, r in zip(sent, received)]
+
+    return jsonify({'labels': labels, 'sent': sent, 'received': received, 'total': total})
 
 @app.route('/add', methods=['GET', 'POST'])
 def add_user():
@@ -209,7 +243,7 @@ def add_user():
 @app.route('/update/<username>', methods=['GET', 'POST'])
 def update_user(username):
     db = get_db()
-    cur = db.execute('SELECT id, username, monthly_bandwidth FROM accounts WHERE username = ?', (username,))
+    cur = db.execute('SELECT id, username, monthly_bandwidth, whitelist FROM accounts WHERE username = ?', (username,))
     row = cur.fetchone()
     if not row:
         flash('Account not found', 'error')
@@ -218,6 +252,8 @@ def update_user(username):
     if request.method == 'POST':
         password = request.form.get('password')
         monthly = request.form.get('monthly_bandwidth', '0')
+        whitelist = request.form.get('whitelist', '')
+
         try:
             monthly_i = int(monthly)
         except Exception:
@@ -230,6 +266,8 @@ def update_user(username):
             params.append(hashed)
         sets.append('monthly_bandwidth = ?')
         params.append(monthly_i)
+        sets.append('whitelist = ?')
+        params.append(whitelist)
         sets.append('ts_updated = ?')
         params.append(int(time.time()))
         params.append(username)

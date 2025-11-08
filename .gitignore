@@ -128,3 +128,6 @@ msadmin
 microsocks.exe
 microsocks.pdb
 microsocks.dSYM/
+
+# VsCode settings
+.vscode/

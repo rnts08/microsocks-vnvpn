@@ -1,31 +1,43 @@
 {% extends 'base.html' %}
 {% block content %}
-  <h2>Accounts</h2>
-  <table>
-    <thead>
-      <tr><th>Username</th><th>Monthly Quota</th><th>Monthly Used</th><th>Total Used</th><th>Last Seen</th><th>Actions</th></tr>
-    </thead>
-    <tbody>
-      {% for r in rows %}
+  <h2 class="mb-4">Accounts</h2>
+
+  <div class="table-responsive">
+    <table class="table table-striped table-hover align-middle">
+      <thead class="table-dark">
         <tr>
-          <td>{{ r.username }}</td>
-          <td>
-            {% if r.monthly_bandwidth and r.monthly_bandwidth > 0 %}
-              {{ '%.2f GB' % (r.monthly_bandwidth / 1_000_000_000) }}
-            {% else %}
-              unlimited
-            {% endif %}
-          </td>
-          <td>{{ (r.m_bytes_sent + r.m_bytes_received) | human_readable }}</td>
-          <td>{{ (r.total_bytes_sent + r.total_bytes_received) | human_readable }}</td>
-          <td>{{ r.last_seen or 'never' }}</td>
-          <td>
-            <a href="{{ url_for('show_user', username=r.username) }}">show</a> |
-            <a href="{{ url_for('update_user', username=r.username) }}">edit</a> |
-            <a href="{{ url_for('delete_user', username=r.username) }}">delete</a>
-          </td>
+          <th>Username</th>
+          <th>Monthly Quota</th>
+          <th>Monthly Used</th>
+          <th>Total Used</th>
+          <th>Last Seen</th>
+          <th>Last IP</th>
+          <th>Actions</th>
         </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td><a href="{{ url_for('show_user', username=r.username) }}">{{ r.username }}</a></td>
+            <td>
+              {% if r.monthly_bandwidth and r.monthly_bandwidth > 0 %}
+                {{ '%.2f GB' % (r.monthly_bandwidth / 1_000_000_000) }}
+              {% else %}
+                unlimited
+              {% endif %}
+            </td>
+            <td>{{ (r.m_bytes_sent + r.m_bytes_received) | human_readable }}</td>
+            <td>{{ (r.total_bytes_sent + r.total_bytes_received) | human_readable }}</td>
+            <td>{{ r.last_seen or 'never' }}</td>
+            <td>{{ r.last_ip or 'unknown' }}</td>
+            <td>
+              <a href="{{ url_for('show_user', username=r.username) }}" class="btn btn-sm btn-outline-primary">Show</a>
+              <a href="{{ url_for('update_user', username=r.username) }}" class="btn btn-sm btn-outline-secondary">Edit</a>
+              <a href="{{ url_for('delete_user', username=r.username) }}" class="btn btn-sm btn-outline-danger">Delete</a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 {% endblock %}

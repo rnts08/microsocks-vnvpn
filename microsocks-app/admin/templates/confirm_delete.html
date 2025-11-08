@@ -1,9 +1,20 @@
 {% extends 'base.html' %}
 {% block content %}
-  <h2>Delete Account: {{ username }}</h2>
-  <p>Are you sure you want to delete account <strong>{{ username }}</strong>? This cannot be undone.</p>
-  <form method="post">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <button type="submit">Yes, delete</button><button type="button" onclick="window.location='{{ url_for('show_user', username=username) }}';">Cancel</button>
-  </form>
+<div class="container mt-5">
+  <div class="card shadow-sm border-secondary mx-auto" style="max-width: 500px;">
+    <div class="card-body">
+      <h4 class="card-title mb-3 text-center">Delete Account: {{ username }}</h4>
+      <p class="card-text mb-4 text-center">
+        Are you sure you want to delete account <strong>{{ username }}</strong>? 
+        This action <span class="text-danger">cannot be undone</span>.
+      </p>
+
+      <form method="post" class="d-flex justify-content-center gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-danger">Yes, delete</button>
+        <button type="button" class="btn btn-secondary" onclick="window.location='{{ url_for('show_user', username=username) }}';">Cancel</button>
+      </form>
+    </div>
+  </div>
+</div>
 {% endblock %}

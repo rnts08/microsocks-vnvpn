@@ -1,23 +1,145 @@
 {% extends 'base.html' %}
 {% block content %}
-  {% if action == 'add' %}
-    <h2>Add Account</h2>
-    <form method="post">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <p><label>Username: <input name="username"></label></p>
-      <p><label>Password: <input name="password" type="password"></label></p>
-      <p><label>Monthly Bandwidth (bytes, 0 = unlimited): <input name="monthly_bandwidth" value="0"></label></p>
-      <p><label>Whitelisted IPs (comma-separated): <input name="whitelist" value="{{ row['whitelist'] }}"></label></p>
-      <p><a href="javascript:history.go(-1);"><button type="button">Cancel</button></a><button type="submit">Create</button></p>
-    </form>
-  {% else %}
-    <h2>Update Account: {{ row['username'] }}</h2>
-    <form method="post">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <p><label>New Password (leave empty to keep): <input name="password" type="password"></label></p>
-      <p><label>Monthly Bandwidth (bytes): <input name="monthly_bandwidth" value="{{ row['monthly_bandwidth'] }}"></label></p>
-      <p><label>Whitelisted IPs (comma-separated): <input name="whitelist" value="{{ row['whitelist'] }}"></label></p>
-      <p><a href="javascript:history.go(-1);"><button type="button">Cancel</button></a><button type="submit">Update</button></p>
-    </form>
-  {% endif %}
+  <div class="card shadow-sm">
+    <div class="card-body">
+      {% if action == 'add' %}
+        <h2 class="card-title mb-4">Add Account</h2>
+        <form method="post" class="needs-validation" novalidate>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+          <div class="mb-3">
+            <label for="username" class="form-label">Username</label>
+            <input id="username" name="username" class="form-control" required
+                   pattern="[A-Za-z0-9_.-]{3,}">
+            <div class="invalid-feedback">
+              Please enter a valid username (at least 3 characters, only letters, numbers, dots, underscores, or hyphens).
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="password" class="form-label">Password</label>
+            <input id="password" name="password" type="password" class="form-control"
+                   minlength="6" required>
+            <div class="invalid-feedback">
+              Please provide a password (minimum 6 characters).
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="monthly_bandwidth" class="form-label d-flex justify-content-between">
+              <span>Monthly Bandwidth (bytes, <span class="text-muted">0 = unlimited</span>)</span>
+              <span id="quota-human" class="text-muted small">0 B</span>
+            </label>
+            <input id="monthly_bandwidth" name="monthly_bandwidth" value="0"
+                   class="form-control" type="number" min="0" step="1000000" required>
+            <div class="invalid-feedback">
+              Please enter a valid bandwidth value (0 or higher, in bytes).
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="whitelist" class="form-label">Whitelisted IPs (comma-separated)</label>
+            <input id="whitelist" name="whitelist" class="form-control"
+                   placeholder="e.g., 192.168.0.1, 10.0.0.5">
+            <div class="invalid-feedback">
+              Please check your IP list (optional, comma-separated).
+            </div>
+          </div>
+
+          <div class="d-flex justify-content-between mt-4">
+            <a href="javascript:history.back()" class="btn btn-outline-secondary">Cancel</a>
+            <button type="submit" class="btn btn-primary">Create</button>
+          </div>
+        </form>
+
+      {% else %}
+        <h2 class="card-title mb-4">Update Account: {{ row.username }}</h2>
+        <form method="post" class="needs-validation" novalidate>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+          <div class="mb-3">
+            <label for="password" class="form-label">
+              New Password <span class="text-muted">(leave empty to keep current)</span>
+            </label>
+            <input id="password" name="password" type="password" class="form-control" minlength="6">
+            <div class="invalid-feedback">
+              Password must be at least 6 characters.
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="monthly_bandwidth" class="form-label d-flex justify-content-between">
+              <span>Monthly Bandwidth (bytes)</span>
+              <span id="quota-human" class="text-muted small">—</span>
+            </label>
+            <input id="monthly_bandwidth" name="monthly_bandwidth"
+                   class="form-control" value="{{ row.monthly_bandwidth }}"
+                   type="number" min="0" step="1000000" required>
+            <div class="invalid-feedback">
+              Please enter a valid number (0 or higher, in bytes).
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="whitelist" class="form-label">Whitelisted IPs (comma-separated)</label>
+            <input id="whitelist" name="whitelist" class="form-control" value="{{ row.whitelist }}">
+            <div class="invalid-feedback">
+              Please check your IP list (optional, comma-separated).
+            </div>
+          </div>
+
+          <div class="d-flex justify-content-between mt-4">
+            <a href="javascript:history.back()" class="btn btn-outline-secondary">Cancel</a>
+            <button type="submit" class="btn btn-success">Update</button>
+          </div>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+
+  <script>
+    // Bootstrap form validation
+    (() => {
+      'use strict';
+      const forms = document.querySelectorAll('.needs-validation');
+      Array.from(forms).forEach(form => {
+        form.addEventListener('submit', event => {
+          if (!form.checkValidity()) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+          form.classList.add('was-validated');
+        }, false);
+      });
+    })();
+
+    // Human-readable quota label
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let size = bytes;
+      let unit = units[0];
+      for (let i = 0; i < units.length - 1 && size >= 1000; i++) {
+        size /= 1000;
+        unit = units[i + 1];
+      }
+      return size.toFixed(2) + ' ' + unit;
+    }
+
+    function updateQuotaLabel() {
+      const input = document.getElementById('monthly_bandwidth');
+      const label = document.getElementById('quota-human');
+      const val = parseInt(input.value || 0);
+      label.textContent = val === 0 ? 'unlimited' : formatBytes(val);
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const input = document.getElementById('monthly_bandwidth');
+      if (input) {
+        updateQuotaLabel();
+        input.addEventListener('input', updateQuotaLabel);
+        input.addEventListener('change', updateQuotaLabel);
+      }
+    });
+  </script>
 {% endblock %}
