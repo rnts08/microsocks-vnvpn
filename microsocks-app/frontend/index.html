@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MicroSocks VPN Packages</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" integrity="sha512-SnH5WK+bZxgPHs44uWix+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkR4j8RykZ4nR9f6JY6Y6M0Q5dWn7bNfY3xg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <style>
+    body {
+      min-height: 100vh;
+      background: linear-gradient(130deg, #0b1020 0%, #141f3a 35%, #1f3b7a 100%);
+      color: #ecf2ff;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+
+    .glass {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      backdrop-filter: blur(8px);
+      border-radius: 1.25rem;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+    }
+
+    .hero-icon {
+      width: 58px;
+      height: 58px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: rgba(26, 188, 156, 0.22);
+      color: #5ef0d4;
+      font-size: 1.5rem;
+    }
+
+    .package-card {
+      transition: all 0.25s ease;
+      border: 2px solid transparent;
+      cursor: pointer;
+      background: rgba(11, 16, 32, 0.5);
+    }
+
+    .package-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(94, 240, 212, 0.4);
+    }
+
+    .package-card.active {
+      border-color: #5ef0d4;
+      box-shadow: 0 0 0 0.2rem rgba(94, 240, 212, 0.25);
+    }
+
+    .badge-speed {
+      background: rgba(94, 240, 212, 0.15);
+      color: #5ef0d4;
+      border: 1px solid rgba(94, 240, 212, 0.4);
+    }
+
+    .form-control, .form-select {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #f7fbff;
+    }
+
+    .form-control:focus, .form-select:focus {
+      border-color: #5ef0d4;
+      box-shadow: 0 0 0 0.25rem rgba(94, 240, 212, 0.2);
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+    }
+
+    .crypto-icon {
+      width: 34px;
+      display: inline-block;
+      text-align: center;
+      color: #ffd166;
+    }
+
+    .step {
+      color: #b8d0ff;
+      font-size: 0.9rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    #paymentBlock {
+      display: none;
+    }
+
+    #doneBlock {
+      display: none;
+    }
+
+    .address-box {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
+      font-size: 0.95rem;
+      word-break: break-all;
+      padding: 0.85rem;
+      border-radius: 0.75rem;
+      background: rgba(0, 0, 0, 0.28);
+      border: 1px dashed rgba(255, 255, 255, 0.25);
+    }
+  </style>
+</head>
+<body>
+  <main class="container py-5">
+    <section class="glass p-4 p-md-5 mb-4">
+      <div class="d-flex align-items-center gap-3 mb-3">
+        <span class="hero-icon"><i class="fa-solid fa-shield-halved"></i></span>
+        <div>
+          <h1 class="h2 mb-1">MicroSocks VPN</h1>
+          <p class="mb-0 text-info-subtle">Secure, private, and instant setup in under 2 minutes.</p>
+        </div>
+      </div>
+      <div class="row g-4 mt-1">
+        <div class="col-lg-7">
+          <p class="step mb-2">Step 1 · Pick a package</p>
+          <div id="packageList" class="row g-3"></div>
+        </div>
+        <div class="col-lg-5">
+          <p class="step mb-2">Step 2 · Choose your crypto</p>
+          <label for="cryptoSelect" class="form-label">Payment currency</label>
+          <select id="cryptoSelect" class="form-select mb-3">
+            <option value="btc">BTC (Bitcoin)</option>
+            <option value="eth">ETH (Ethereum)</option>
+            <option value="usdt">USDT (Tether)</option>
+          </select>
+
+          <button id="generateBtn" class="btn btn-success w-100 mb-3">
+            <i class="fa-solid fa-wallet me-2"></i>Get Payment Address
+          </button>
+
+          <div id="paymentBlock" class="glass p-3">
+            <p class="step mb-2">Step 3 · Send payment</p>
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <strong id="payCurrency">BTC</strong>
+              <span class="badge text-bg-dark" id="payAmount">0.0000</span>
+            </div>
+            <div id="payAddress" class="address-box mb-3"></div>
+            <button id="copyBtn" class="btn btn-outline-light btn-sm mb-2">
+              <i class="fa-regular fa-copy me-1"></i>Copy Address
+            </button>
+            <button id="finishBtn" class="btn btn-primary w-100 mt-2">
+              I Have Sent the Payment
+            </button>
+          </div>
+
+          <div id="doneBlock" class="alert alert-success mt-3 mb-0" role="alert">
+            <i class="fa-solid fa-circle-check me-2"></i>
+            Order complete! Your VPN credentials will be sent after mock confirmation.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const packages = [
+      { id: 'starter', name: 'Starter', speed: '100 Mbps', locations: 10, priceUSD: 4.99, icon: 'fa-rocket' },
+      { id: 'pro', name: 'Pro', speed: '1 Gbps', locations: 35, priceUSD: 9.99, icon: 'fa-bolt-lightning' },
+      { id: 'ultimate', name: 'Ultimate', speed: 'Unlimited', locations: 60, priceUSD: 14.99, icon: 'fa-crown' }
+    ];
+
+    const rates = { btc: 65000, eth: 3500, usdt: 1 };
+    const prefixes = { btc: 'bc1q', eth: '0x', usdt: 'T' };
+    let selectedPackage = packages[0];
+
+    const packageList = document.getElementById('packageList');
+    const cryptoSelect = document.getElementById('cryptoSelect');
+    const generateBtn = document.getElementById('generateBtn');
+    const paymentBlock = document.getElementById('paymentBlock');
+    const doneBlock = document.getElementById('doneBlock');
+    const payCurrency = document.getElementById('payCurrency');
+    const payAmount = document.getElementById('payAmount');
+    const payAddress = document.getElementById('payAddress');
+    const copyBtn = document.getElementById('copyBtn');
+    const finishBtn = document.getElementById('finishBtn');
+
+    function renderPackages() {
+      packageList.innerHTML = '';
+      packages.forEach((pkg) => {
+        const card = document.createElement('div');
+        card.className = 'col-md-4';
+        card.innerHTML = `
+          <article class="package-card glass h-100 p-3 ${pkg.id === selectedPackage.id ? 'active' : ''}" data-package="${pkg.id}">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <h2 class="h5 mb-0">${pkg.name}</h2>
+              <i class="fa-solid ${pkg.icon} text-info"></i>
+            </div>
+            <p class="small mb-2"><span class="badge badge-speed rounded-pill">${pkg.speed}</span></p>
+            <p class="small mb-1">${pkg.locations} server locations</p>
+            <p class="h4 mb-0">$${pkg.priceUSD.toFixed(2)}<span class="fs-6 text-secondary">/month</span></p>
+          </article>
+        `;
+        card.addEventListener('click', () => {
+          selectedPackage = pkg;
+          renderPackages();
+          doneBlock.style.display = 'none';
+        });
+        packageList.appendChild(card);
+      });
+    }
+
+    function mockAddress(currency) {
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789';
+      let body = '';
+      for (let i = 0; i < 28; i += 1) {
+        body += alphabet[Math.floor(Math.random() * alphabet.length)];
+      }
+      return `${prefixes[currency]}${body}`;
+    }
+
+    function getAmount(usd, currency) {
+      const raw = usd / rates[currency];
+      const precision = currency === 'usdt' ? 2 : 6;
+      return raw.toFixed(precision);
+    }
+
+    async function mockCreateOrder(packageId, currency) {
+      const pkg = packages.find((p) => p.id === packageId);
+      const amount = getAmount(pkg.priceUSD, currency);
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          resolve({
+            orderId: `ORD-${Date.now()}`,
+            currency,
+            amount,
+            address: mockAddress(currency)
+          });
+        }, 500);
+      });
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      generateBtn.disabled = true;
+      generateBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Generating...';
+      doneBlock.style.display = 'none';
+
+      const currency = cryptoSelect.value;
+      const order = await mockCreateOrder(selectedPackage.id, currency);
+
+      payCurrency.innerHTML = `<span class="crypto-icon"><i class="fa-brands fa-bitcoin"></i></span>${order.currency.toUpperCase()} · ${selectedPackage.name}`;
+      payAmount.textContent = `${order.amount} ${order.currency.toUpperCase()}`;
+      payAddress.textContent = order.address;
+      paymentBlock.style.display = 'block';
+
+      generateBtn.disabled = false;
+      generateBtn.innerHTML = '<i class="fa-solid fa-wallet me-2"></i>Get Payment Address';
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(payAddress.textContent);
+        copyBtn.innerHTML = '<i class="fa-solid fa-check me-1"></i>Copied';
+        setTimeout(() => {
+          copyBtn.innerHTML = '<i class="fa-regular fa-copy me-1"></i>Copy Address';
+        }, 1200);
+      } catch {
+        copyBtn.textContent = 'Copy failed';
+      }
+    });
+
+    finishBtn.addEventListener('click', () => {
+      doneBlock.style.display = 'block';
+      doneBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+
+    renderPackages();
+  </script>
+</body>
+</html>
