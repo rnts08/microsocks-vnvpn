@@ -82,7 +82,33 @@ struct cfg {
 	unsigned port;
 	char dbpath[PATH_MAX];
 	char logfile[PATH_MAX];
+	int auth_fail_window_sec;
+	int auth_fail_limit;
+	int connect_rate_window_sec;
+	int connect_rate_limit;
+	int max_concurrent_per_account;
+	int connections_retention_days;
 };
+
+#define RL_MAX_ENTRIES 1024
+
+struct rl_entry {
+	char key[INET6_ADDRSTRLEN + 1];
+	int count;
+	time_t window_start;
+};
+
+static struct rl_entry auth_fail_rl[RL_MAX_ENTRIES];
+static struct rl_entry connect_rl[RL_MAX_ENTRIES];
+static pthread_mutex_t rl_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int cfg_auth_fail_window_sec = 300;
+static int cfg_auth_fail_limit = 10;
+static int cfg_connect_rate_window_sec = 60;
+static int cfg_connect_rate_limit = 60;
+static int cfg_max_concurrent_per_account = 3;
+static int cfg_connections_retention_days = 90;
+static time_t last_connections_prune = 0;
 
 /* Helper: trim whitespace in place */
 static char *trim(char *s) {
@@ -101,6 +127,69 @@ static int parse_bool(const char *v) {
 	if(strcasecmp(v, "true") == 0) return 1;
 	if(strcasecmp(v, "yes") == 0) return 1;
 	return 0;
+}
+
+static int parse_int_default(const char *v, int def) {
+	if(!v || !*v) return def;
+	char *end = NULL;
+	long x = strtol(v, &end, 10);
+	if(end == v || *end != '\0') return def;
+	if(x < 0) return def;
+	if(x > INT_MAX) return def;
+	return (int)x;
+}
+
+static struct rl_entry *rl_get_slot(struct rl_entry *table, const char *key) {
+	unsigned long h = 5381;
+	for(const unsigned char *p = (const unsigned char*)key; *p; ++p)
+		h = ((h << 5) + h) + *p;
+	int idx = (int)(h % RL_MAX_ENTRIES);
+	for(int i = 0; i < RL_MAX_ENTRIES; ++i) {
+		int pos = (idx + i) % RL_MAX_ENTRIES;
+		if(table[pos].key[0] == '\0') {
+			strncpy(table[pos].key, key, sizeof(table[pos].key)-1);
+			table[pos].key[sizeof(table[pos].key)-1] = '\0';
+			return &table[pos];
+		}
+		if(strcmp(table[pos].key, key) == 0)
+			return &table[pos];
+	}
+	return &table[idx];
+}
+
+static int rl_consume(struct rl_entry *table, const char *key, int window_sec, int limit, int penalty_on_reject) {
+	time_t now = time(NULL);
+	int allowed = 1;
+	if(limit <= 0 || window_sec <= 0) return 1;
+	pthread_mutex_lock(&rl_lock);
+	struct rl_entry *e = rl_get_slot(table, key);
+	if(now - e->window_start >= window_sec || e->window_start == 0) {
+		e->window_start = now;
+		e->count = 0;
+	}
+	if(e->count >= limit) {
+		allowed = 0;
+		if(penalty_on_reject) e->count++;
+	} else {
+		e->count++;
+	}
+	pthread_mutex_unlock(&rl_lock);
+	return allowed;
+}
+
+static void record_auth_failure(const char *client_ip) {
+	if(!client_ip || !*client_ip) return;
+	(void)rl_consume(auth_fail_rl, client_ip, cfg_auth_fail_window_sec, cfg_auth_fail_limit, 1);
+}
+
+static int auth_fail_rate_allowed(const char *client_ip) {
+	if(!client_ip || !*client_ip) return 1;
+	return rl_consume(auth_fail_rl, client_ip, cfg_auth_fail_window_sec, cfg_auth_fail_limit, 0);
+}
+
+static int connection_rate_allowed(const char *client_ip) {
+	if(!client_ip || !*client_ip) return 1;
+	return rl_consume(connect_rl, client_ip, cfg_connect_rate_window_sec, cfg_connect_rate_limit, 0);
 }
 
 /* Read a simple ini-style file with lines key = value (no sections). */
@@ -132,9 +221,21 @@ static void read_config_file(const char *path, struct cfg *cfg) {
         } else if(strcasecmp(key, "database") == 0) {
             strncpy(cfg->dbpath, val, sizeof(cfg->dbpath)-1);
             cfg->dbpath[sizeof(cfg->dbpath)-1] = '\0';
-        } else if(strcasecmp(key, "logfile") == 0) {
+		} else if(strcasecmp(key, "logfile") == 0) {
             strncpy(cfg->logfile, val, sizeof(cfg->logfile)-1);
             cfg->logfile[sizeof(cfg->logfile)-1] = '\0';
+		} else if(strcasecmp(key, "auth_fail_window_sec") == 0) {
+			cfg->auth_fail_window_sec = parse_int_default(val, cfg->auth_fail_window_sec);
+		} else if(strcasecmp(key, "auth_fail_limit") == 0) {
+			cfg->auth_fail_limit = parse_int_default(val, cfg->auth_fail_limit);
+		} else if(strcasecmp(key, "connect_rate_window_sec") == 0) {
+			cfg->connect_rate_window_sec = parse_int_default(val, cfg->connect_rate_window_sec);
+		} else if(strcasecmp(key, "connect_rate_limit") == 0) {
+			cfg->connect_rate_limit = parse_int_default(val, cfg->connect_rate_limit);
+		} else if(strcasecmp(key, "max_concurrent_per_account") == 0) {
+			cfg->max_concurrent_per_account = parse_int_default(val, cfg->max_concurrent_per_account);
+		} else if(strcasecmp(key, "connections_retention_days") == 0) {
+			cfg->connections_retention_days = parse_int_default(val, cfg->connections_retention_days);
         }
     }
     fclose(f);
@@ -339,38 +440,20 @@ static int connect_socks_target(unsigned char *buf, size_t n, struct client *cli
    1 = IP is allowed (either in whitelist or whitelist is empty)
    0 = IP is not in whitelist */
 static int is_ip_allowed(int account_id, const char *client_ip) {
-    sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT whitelist FROM accounts WHERE id = ?";
-    int allowed = 0;
-    sqlite3 *db = db_get_handle();
+    union sockaddr_union sa;
+    memset(&sa, 0, sizeof(sa));
 
-    if (!db) return 0;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) return 0;
-
-    sqlite3_bind_int(stmt, 1, account_id);
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *whitelist = (const char*)sqlite3_column_text(stmt, 0);
-        if (!whitelist || !*whitelist) {
-            allowed = 1; /* empty whitelist = allow all */
-        } else {
-            char *wlist = strdup(whitelist);
-            if (wlist) {
-                char *saveptr;
-                char *token = strtok_r(wlist, ",", &saveptr);
-                while (token) {
-                    if (strcmp(token, client_ip) == 0) {
-                        allowed = 1;
-                        break;
-                    }
-                    token = strtok_r(NULL, ",", &saveptr);
-                }
-                free(wlist);
-            }
-        }
+    if(strchr(client_ip, ':')) {
+        sa.v6.sin6_family = AF_INET6;
+        if(inet_pton(AF_INET6, client_ip, &sa.v6.sin6_addr) != 1)
+            return 0;
+    } else {
+        sa.v4.sin_family = AF_INET;
+        if(inet_pton(AF_INET, client_ip, &sa.v4.sin_addr) != 1)
+            return 0;
     }
-    sqlite3_finalize(stmt);
-    return allowed;
+
+    return db_account_check_whitelist(account_id, &sa);
 }
 
 static enum authmethod check_auth_method(unsigned char *buf, size_t n, struct client*client) {
@@ -462,19 +545,24 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n, struct thr
 	char client_ip[INET6_ADDRSTRLEN];
 	void *addr_ptr = SOCKADDR_UNION_ADDRESS(&t->client.addr);
 	inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), addr_ptr, client_ip, sizeof(client_ip));
+	if(!auth_fail_rate_allowed(client_ip))
+		return EC_NOT_ALLOWED;
 
 	/* Use database authentication */
 	t->account_id = db_account_auth(user, pass);
 	if(t->account_id == -2) return EC_NOT_ALLOWED; /* account disabled */
 	if(t->account_id >= 0) {
 		/* Check whitelist */
-		if(!is_ip_allowed(t->account_id, client_ip)) 
+		if(!is_ip_allowed(t->account_id, client_ip)) {
+			record_auth_failure(client_ip);
 			return EC_NOT_ALLOWED;
+		}
 		
 		/* Update last client IP */
 		db_account_update_last_ip(t->account_id, client_ip);
 		return EC_SUCCESS;
 	}
+	record_auth_failure(client_ip);
 	return EC_NOT_ALLOWED;
 }
 
@@ -539,6 +627,21 @@ static void* clientthread(void *data) {
 	int remotefd = handshake(t);
 	int online_tracked = 0;
 	const char *connection_status = "failed";
+	if(remotefd != -1 && t->account_id >= 0) {
+		char client_ip[INET6_ADDRSTRLEN];
+		void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+		inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, client_ip, sizeof(client_ip));
+
+		if(!connection_rate_allowed(client_ip)) {
+			connection_status = "rate_limited";
+			close(remotefd);
+			remotefd = -1;
+		} else if(cfg_max_concurrent_per_account > 0 && db_account_get_online(t->account_id) >= cfg_max_concurrent_per_account) {
+			connection_status = "max_concurrent_exceeded";
+			close(remotefd);
+			remotefd = -1;
+		}
+	}
 	if(remotefd != -1 && t->account_id >= 0) {
 		if(account_monthly_quota_exceeded(t->account_id)) {
 			if(CONFIG_LOG) {
@@ -627,12 +730,24 @@ static void print_config(const struct cfg *cfg) {
 		   "port = %u\n"
 		   "quiet = %s\n"
 		   "database = %s\n"
-		   "logfile = %s\n",
+		   "logfile = %s\n"
+		   "auth_fail_window_sec = %d\n"
+		   "auth_fail_limit = %d\n"
+		   "connect_rate_window_sec = %d\n"
+		   "connect_rate_limit = %d\n"
+		   "max_concurrent_per_account = %d\n"
+		   "connections_retention_days = %d\n",
 		   cfg->listenip,
 		   cfg->port,
 		   cfg->quiet ? "true" : "false",
 		   cfg->dbpath,
-		   cfg->logfile[0] ? cfg->logfile : "(stderr)");
+		   cfg->logfile[0] ? cfg->logfile : "(stderr)",
+		   cfg->auth_fail_window_sec,
+		   cfg->auth_fail_limit,
+		   cfg->connect_rate_window_sec,
+		   cfg->connect_rate_limit,
+		   cfg->max_concurrent_per_account,
+		   cfg->connections_retention_days);
 	exit(0);
 }
 
@@ -648,6 +763,12 @@ static int usage(void) {
 		"  listen   = <ip>          (listen address, e.g. 0.0.0.0)\n"
 		"  port     = <port>        (listen port, e.g. 1080)\n"
 		"  database = <path>        (sqlite DB path)\n"
+		"  auth_fail_window_sec = <sec>\n"
+		"  auth_fail_limit = <count>\n"
+		"  connect_rate_window_sec = <sec>\n"
+		"  connect_rate_limit = <count>\n"
+		"  max_concurrent_per_account = <count>\n"
+		"  connections_retention_days = <days>\n"
 		"\n"
 		"CLI flags override values in the config file. If no config is found, sane\n"
 		"defaults are used: quiet=false, listen=0.0.0.0, port=1080, database is\n"
@@ -699,6 +820,12 @@ int main(int argc, char** argv) {
 	cfg.listenip[sizeof(cfg.listenip)-1] = '\0';
 	cfg.port = 1080;
 	cfg.logfile[0] = '\0';
+	cfg.auth_fail_window_sec = 300;
+	cfg.auth_fail_limit = 10;
+	cfg.connect_rate_window_sec = 60;
+	cfg.connect_rate_limit = 60;
+	cfg.max_concurrent_per_account = 3;
+	cfg.connections_retention_days = 90;
 	default_dbpath(cfg.dbpath, sizeof(cfg.dbpath));
 
 	/* read config file if present */
@@ -770,6 +897,12 @@ int main(int argc, char** argv) {
 		}
 	}
 	const char *listenip = listenip_buf;
+	cfg_auth_fail_window_sec = cfg.auth_fail_window_sec;
+	cfg_auth_fail_limit = cfg.auth_fail_limit;
+	cfg_connect_rate_window_sec = cfg.connect_rate_window_sec;
+	cfg_connect_rate_limit = cfg.connect_rate_limit;
+	cfg_max_concurrent_per_account = cfg.max_concurrent_per_account;
+	cfg_connections_retention_days = cfg.connections_retention_days;
 	
 	/* Setup signal handlers */
 	signal(SIGPIPE, SIG_IGN);
@@ -834,6 +967,13 @@ int main(int argc, char** argv) {
 
 	while(1) {
 		collect(threads);
+		time_t loop_now = time(NULL);
+		if(cfg_connections_retention_days > 0 && (last_connections_prune == 0 || loop_now - last_connections_prune >= 3600)) {
+			if(db_prune_connections_older_than_days(cfg_connections_retention_days) == SQLITE_OK) {
+				dolog("pruned connections older than %d days\n", cfg_connections_retention_days);
+			}
+			last_connections_prune = loop_now;
+		}
 		int month_key = current_month_key(time(NULL));
 		if(last_reset_month != -1 && month_key != -1 && month_key != last_reset_month) {
 			if(db_reset_monthly_stats() == SQLITE_OK) {

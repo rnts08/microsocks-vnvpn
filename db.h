@@ -44,6 +44,7 @@ int db_account_update_online(int account_id, int delta);
 int db_account_update_last_ip(int account_id, const char *client_ip);
 int db_account_check_whitelist(int account_id, union sockaddr_union *addr);
 int db_account_add_whitelist(int account_id, const char *ip);
+int db_account_get_online(int account_id);
 
 /* Connection logging */
 int db_log_connection(int account_id, const char *client_ip, const char *destination,
@@ -51,5 +52,6 @@ int db_log_connection(int account_id, const char *client_ip, const char *destina
 
 /* Monthly reset - call this periodically to reset monthly counters */
 int db_reset_monthly_stats(void);
+int db_prune_connections_older_than_days(int keep_days);
 
 #endif /* DB_H */

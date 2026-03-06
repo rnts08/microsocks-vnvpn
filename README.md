@@ -115,16 +115,16 @@ Known Fix List (Code-Level Gaps)
 --------------------------------
 
 1. **Whitelist format is a comma-separated text field.**
-   This is simple but brittle for management/auditing. Consider a normalized `account_whitelist` table with one row per IP/CIDR.
+   ✅ Implemented normalized `account_whitelist` table (one row per account/IP), while maintaining compatibility with legacy CSV `accounts.whitelist` reads/writes.
 
 2. **Server-side rate limiting / abuse protection is absent.**
-   Add controls for auth brute force, per-IP connection rate, and max concurrent sessions per account.
+   ✅ Implemented controls for auth brute-force (per-IP failed auth window), per-IP connection rate, and max concurrent sessions per account.
 
 3. **Flask admin now enforces safer startup defaults.**
    It refuses to start with `admin/admin`, empty password, or weak/default `SECRET_KEY`, and debug is opt-in via `FLASK_DEBUG=1`.
 
 4. **Connection-log retention policy is not implemented.**
-   `connections` can grow without bounds; add retention/archival and cleanup tooling.
+   ✅ Implemented server-side periodic pruning using configurable `connections_retention_days`.
 
 
 Notes
