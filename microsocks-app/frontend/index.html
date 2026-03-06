@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MicroSocks VPN Packages</title>
+  <title>MicroSocks VPN Bitcoin Packages</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" integrity="sha512-SnH5WK+bZxgPHs44uWix+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkR4j8RykZ4nR9f6JY6Y6M0Q5dWn7bNfY3xg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
   <style>
@@ -119,13 +119,14 @@
           <div id="packageList" class="row g-3"></div>
         </div>
         <div class="col-lg-5">
-          <p class="step mb-2">Step 2 · Choose your crypto</p>
-          <label for="cryptoSelect" class="form-label">Payment currency</label>
-          <select id="cryptoSelect" class="form-select mb-3">
-            <option value="btc">BTC (Bitcoin)</option>
-            <option value="eth">ETH (Ethereum)</option>
-            <option value="usdt">USDT (Tether)</option>
-          </select>
+          <p class="step mb-2">Step 2 · Enter account + payment sender details</p>
+          <label for="emailInput" class="form-label">Email address (used as username)</label>
+          <input id="emailInput" type="email" class="form-control mb-3" placeholder="you@example.com" required>
+
+          <label for="senderAddressInput" class="form-label">Your BTC sender address</label>
+          <input id="senderAddressInput" type="text" class="form-control mb-3" placeholder="bc1q..." required>
+
+          <p class="small text-info-subtle mb-3">All package prices are converted to BTC at checkout.</p>
 
           <button id="generateBtn" class="btn btn-success w-100 mb-3">
             <i class="fa-solid fa-wallet me-2"></i>Get Payment Address
@@ -137,6 +138,7 @@
               <strong id="payCurrency">BTC</strong>
               <span class="badge text-bg-dark" id="payAmount">0.0000</span>
             </div>
+            <p class="small mb-2" id="orderMeta"></p>
             <div id="payAddress" class="address-box mb-3"></div>
             <button id="copyBtn" class="btn btn-outline-light btn-sm mb-2">
               <i class="fa-regular fa-copy me-1"></i>Copy Address
@@ -148,7 +150,7 @@
 
           <div id="doneBlock" class="alert alert-success mt-3 mb-0" role="alert">
             <i class="fa-solid fa-circle-check me-2"></i>
-            Order complete! Your VPN credentials will be sent after mock confirmation.
+            Order complete! We will provision your VPN account for <strong id="doneEmail"></strong> after payment confirmation.
           </div>
         </div>
       </div>
@@ -157,25 +159,28 @@
 
   <script>
     const packages = [
-      { id: 'starter', name: 'Starter', speed: '100 Mbps', locations: 10, priceUSD: 4.99, icon: 'fa-rocket' },
-      { id: 'pro', name: 'Pro', speed: '1 Gbps', locations: 35, priceUSD: 9.99, icon: 'fa-bolt-lightning' },
-      { id: 'ultimate', name: 'Ultimate', speed: 'Unlimited', locations: 60, priceUSD: 14.99, icon: 'fa-crown' }
+      { id: 'monthly-1gb', name: '1 Month · 1GB/Day', details: 'Daily capped access for one month', priceUSD: 10, icon: 'fa-calendar-days' },
+      { id: 'paygo-10gb', name: 'Pay-as-you-go · 10GB', details: 'Top up data in 10GB blocks', priceUSD: 5, icon: 'fa-chart-simple' },
+      { id: 'unlimited', name: 'Unlimited Data', details: 'No data cap for heavy usage', priceUSD: 500, icon: 'fa-infinity' }
     ];
 
-    const rates = { btc: 65000, eth: 3500, usdt: 1 };
-    const prefixes = { btc: 'bc1q', eth: '0x', usdt: 'T' };
+    const btcUsdRate = 65000;
+    const prefixes = { btc: 'bc1q' };
     let selectedPackage = packages[0];
 
     const packageList = document.getElementById('packageList');
-    const cryptoSelect = document.getElementById('cryptoSelect');
+    const emailInput = document.getElementById('emailInput');
+    const senderAddressInput = document.getElementById('senderAddressInput');
     const generateBtn = document.getElementById('generateBtn');
     const paymentBlock = document.getElementById('paymentBlock');
     const doneBlock = document.getElementById('doneBlock');
     const payCurrency = document.getElementById('payCurrency');
     const payAmount = document.getElementById('payAmount');
+    const orderMeta = document.getElementById('orderMeta');
     const payAddress = document.getElementById('payAddress');
     const copyBtn = document.getElementById('copyBtn');
     const finishBtn = document.getElementById('finishBtn');
+    const doneEmail = document.getElementById('doneEmail');
 
     function renderPackages() {
       packageList.innerHTML = '';
@@ -188,9 +193,8 @@
               <h2 class="h5 mb-0">${pkg.name}</h2>
               <i class="fa-solid ${pkg.icon} text-info"></i>
             </div>
-            <p class="small mb-2"><span class="badge badge-speed rounded-pill">${pkg.speed}</span></p>
-            <p class="small mb-1">${pkg.locations} server locations</p>
-            <p class="h4 mb-0">$${pkg.priceUSD.toFixed(2)}<span class="fs-6 text-secondary">/month</span></p>
+            <p class="small mb-2"><span class="badge badge-speed rounded-pill">${pkg.details}</span></p>
+            <p class="h4 mb-0">$${pkg.priceUSD.toFixed(2)}</p>
           </article>
         `;
         card.addEventListener('click', () => {
@@ -211,37 +215,45 @@
       return `${prefixes[currency]}${body}`;
     }
 
-    function getAmount(usd, currency) {
-      const raw = usd / rates[currency];
-      const precision = currency === 'usdt' ? 2 : 6;
-      return raw.toFixed(precision);
+    function getBtcAmount(usd) {
+      return (usd / btcUsdRate).toFixed(6);
     }
 
-    async function mockCreateOrder(packageId, currency) {
+    async function mockCreateOrder(packageId, email, senderAddress) {
       const pkg = packages.find((p) => p.id === packageId);
-      const amount = getAmount(pkg.priceUSD, currency);
+      const amount = getBtcAmount(pkg.priceUSD);
       return new Promise((resolve) => {
         setTimeout(() => {
           resolve({
             orderId: `ORD-${Date.now()}`,
-            currency,
+            email,
+            senderAddress,
+            currency: 'btc',
             amount,
-            address: mockAddress(currency)
+            address: mockAddress('btc')
           });
         }, 500);
       });
     }
 
     generateBtn.addEventListener('click', async () => {
+      const email = emailInput.value.trim();
+      const senderAddress = senderAddressInput.value.trim();
+
+      if (!email || !senderAddress) {
+        alert('Please provide your email address and BTC sender address before generating payment details.');
+        return;
+      }
+
       generateBtn.disabled = true;
       generateBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Generating...';
       doneBlock.style.display = 'none';
 
-      const currency = cryptoSelect.value;
-      const order = await mockCreateOrder(selectedPackage.id, currency);
+      const order = await mockCreateOrder(selectedPackage.id, email, senderAddress);
 
       payCurrency.innerHTML = `<span class="crypto-icon"><i class="fa-brands fa-bitcoin"></i></span>${order.currency.toUpperCase()} · ${selectedPackage.name}`;
       payAmount.textContent = `${order.amount} ${order.currency.toUpperCase()}`;
+      orderMeta.textContent = `Username/email: ${order.email} · Sender wallet: ${order.senderAddress}`;
       payAddress.textContent = order.address;
       paymentBlock.style.display = 'block';
 
@@ -262,6 +274,7 @@
     });
 
     finishBtn.addEventListener('click', () => {
+      doneEmail.textContent = emailInput.value.trim();
       doneBlock.style.display = 'block';
       doneBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
