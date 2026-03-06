@@ -125,10 +125,12 @@ uploads/
 # Ignore microsocks build artifacts
 microsocks
 msadmin
-msdadmin
 microsocks.exe
 microsocks.pdb
 microsocks.dSYM/
+
+# Installation
+dest/
 
 # VsCode settings
 .vscode/
