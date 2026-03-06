@@ -97,6 +97,75 @@ export SECRET_KEY='replace-me-with-random-value'
 python app.py
 ```
 
+
+Observability (Prometheus + Grafana)
+-----------------------------------
+
+The server can expose a Prometheus-compatible endpoint over HTTP:
+
+- `GET /metrics`: Prometheus text format
+- `GET /healthz` or `GET /-/healthy`: simple health check returning `ok`
+
+### Enable metrics endpoint
+
+In `microsocks.conf`:
+
+```ini
+metrics_listen = 127.0.0.1
+metrics_port = 9108
+```
+
+Set `metrics_port = 0` to disable the endpoint.
+
+### Exported metrics
+
+- `microsocks_auth_failures_total` (counter): failed auth attempts
+- `microsocks_active_sessions` (gauge): active authenticated proxy sessions
+- `microsocks_bytes_uploaded_total` (counter): bytes client -> target
+- `microsocks_bytes_downloaded_total` (counter): bytes target -> client
+- `microsocks_bytes_per_second` (gauge): average bytes/sec since process start
+- `microsocks_db_calls_total` (counter): measured DB calls from request path
+- `microsocks_db_latency_seconds_avg` (gauge): average DB latency
+- `microsocks_db_latency_seconds_max` (gauge): max DB latency
+
+### Prometheus scrape example
+
+```yaml
+scrape_configs:
+  - job_name: microsocks
+    static_configs:
+      - targets: ["127.0.0.1:9108"]
+```
+
+If Prometheus runs on a different host, bind metrics to a reachable interface or use a reverse proxy.
+
+### Grafana quick-start
+
+1. Add Prometheus as a Grafana data source (`Configuration -> Data sources`).
+2. Create a dashboard and use these PromQL queries:
+
+- Auth failures per minute:
+  - `rate(microsocks_auth_failures_total[1m])`
+- Active sessions:
+  - `microsocks_active_sessions`
+- Upload throughput (bytes/sec):
+  - `rate(microsocks_bytes_uploaded_total[1m])`
+- Download throughput (bytes/sec):
+  - `rate(microsocks_bytes_downloaded_total[1m])`
+- DB latency average (ms):
+  - `microsocks_db_latency_seconds_avg * 1000`
+- DB latency max (ms):
+  - `microsocks_db_latency_seconds_max * 1000`
+
+### Alerting ideas
+
+- High auth-failure rate:
+  - `rate(microsocks_auth_failures_total[5m]) > 5`
+- DB latency spike:
+  - `microsocks_db_latency_seconds_avg > 0.050`
+- Unexpectedly low active sessions (service degradation signal):
+  - `microsocks_active_sessions == 0` (only where traffic is expected)
+
 Deployment Readiness: TODO List
 -------------------------------
 
@@ -105,7 +174,7 @@ The project is functional, but the following work should be done before producti
 1. ✅ Added hardened systemd unit example at `contrib/systemd/microsocks.service` (dedicated user/group, `ProtectSystem`, `NoNewPrivileges`, `PrivateTmp`, capability bounding, and explicit writable paths).
 2. Provide a documented backup/restore strategy for SQLite (hot backups, retention, restore drill).
 3. Add database maintenance guidance (`VACUUM`, WAL checkpoint policy, log retention/rotation for `connections`).
-4. Add observability endpoints or metrics export (Prometheus/textfile) for auth failures, active sessions, bytes/sec, and DB latency.
+4. ✅ Added Prometheus metrics endpoint (`/metrics`) with auth failures, active sessions, bytes/sec, and DB latency; plus `/healthz`.
 5. Add integration tests for end-to-end SOCKS5 auth + accounting under concurrent load.
 6. Add load/performance sizing guide (expected users/throughput vs CPU, memory, and disk I/O).
 7. Add release/versioned upgrade playbook (schema migrations, rollback steps).

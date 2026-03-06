@@ -42,6 +42,7 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <inttypes.h>
 
 /* timeout in microseconds on resource exhaustion to prevent excessive
    cpu usage. */
@@ -88,7 +89,30 @@ struct cfg {
 	int connect_rate_limit;
 	int max_concurrent_per_account;
 	int connections_retention_days;
+	char metrics_listen[128];
+	unsigned metrics_port;
 };
+
+struct metrics_state {
+	pthread_mutex_t lock;
+	uint64_t auth_failures_total;
+	uint64_t active_sessions;
+	uint64_t bytes_up_total;
+	uint64_t bytes_down_total;
+	uint64_t db_calls_total;
+	uint64_t db_latency_usec_total;
+	uint64_t db_latency_usec_max;
+	time_t started_at;
+};
+
+static struct metrics_state g_metrics = {
+	.lock = PTHREAD_MUTEX_INITIALIZER,
+	.started_at = 0,
+};
+
+static int metrics_server_enabled = 0;
+static char metrics_listen_addr[128] = "127.0.0.1";
+static unsigned metrics_listen_port = 0;
 
 #define RL_MAX_ENTRIES 1024
 
@@ -137,6 +161,155 @@ static int parse_int_default(const char *v, int def) {
 	if(x < 0) return def;
 	if(x > INT_MAX) return def;
 	return (int)x;
+}
+
+static uint64_t now_monotonic_usec(void) {
+	struct timespec ts;
+	if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+static uint64_t metrics_db_start(void) {
+	return now_monotonic_usec();
+}
+
+static void metrics_db_finish(uint64_t started_usec) {
+	if(started_usec == 0) return;
+	uint64_t ended_usec = now_monotonic_usec();
+	if(ended_usec < started_usec) return;
+	uint64_t latency = ended_usec - started_usec;
+	pthread_mutex_lock(&g_metrics.lock);
+	g_metrics.db_calls_total++;
+	g_metrics.db_latency_usec_total += latency;
+	if(latency > g_metrics.db_latency_usec_max)
+		g_metrics.db_latency_usec_max = latency;
+	pthread_mutex_unlock(&g_metrics.lock);
+}
+
+static void metrics_auth_failure_inc(void) {
+	pthread_mutex_lock(&g_metrics.lock);
+	g_metrics.auth_failures_total++;
+	pthread_mutex_unlock(&g_metrics.lock);
+}
+
+static void metrics_active_sessions_add(int delta) {
+	pthread_mutex_lock(&g_metrics.lock);
+	if(delta > 0) {
+		g_metrics.active_sessions += (uint64_t)delta;
+	} else if(delta < 0) {
+		uint64_t sub = (uint64_t)(-delta);
+		if(g_metrics.active_sessions > sub) g_metrics.active_sessions -= sub;
+		else g_metrics.active_sessions = 0;
+	}
+	pthread_mutex_unlock(&g_metrics.lock);
+}
+
+static void metrics_add_connection_bytes(size_t up, size_t down) {
+	pthread_mutex_lock(&g_metrics.lock);
+	g_metrics.bytes_up_total += (uint64_t)up;
+	g_metrics.bytes_down_total += (uint64_t)down;
+	pthread_mutex_unlock(&g_metrics.lock);
+}
+
+static int metrics_build_text(char *out, size_t outlen) {
+	uint64_t auth_failures_total, active_sessions, bytes_up_total, bytes_down_total;
+	uint64_t db_calls_total, db_latency_usec_total, db_latency_usec_max;
+	time_t started_at;
+	pthread_mutex_lock(&g_metrics.lock);
+	auth_failures_total = g_metrics.auth_failures_total;
+	active_sessions = g_metrics.active_sessions;
+	bytes_up_total = g_metrics.bytes_up_total;
+	bytes_down_total = g_metrics.bytes_down_total;
+	db_calls_total = g_metrics.db_calls_total;
+	db_latency_usec_total = g_metrics.db_latency_usec_total;
+	db_latency_usec_max = g_metrics.db_latency_usec_max;
+	started_at = g_metrics.started_at;
+	pthread_mutex_unlock(&g_metrics.lock);
+
+	time_t now = time(NULL);
+	double uptime = (started_at > 0 && now > started_at) ? (double)(now - started_at) : 1.0;
+	double bytes_per_sec = ((double)bytes_up_total + (double)bytes_down_total) / uptime;
+	double db_latency_avg_seconds = 0.0;
+	if(db_calls_total > 0)
+		db_latency_avg_seconds = ((double)db_latency_usec_total / 1000000.0) / (double)db_calls_total;
+
+	return snprintf(out, outlen,
+		"# HELP microsocks_auth_failures_total Total failed authentication attempts.\n"
+		"# TYPE microsocks_auth_failures_total counter\n"
+		"microsocks_auth_failures_total %" PRIu64 "\n"
+		"# HELP microsocks_active_sessions Active authenticated proxy sessions.\n"
+		"# TYPE microsocks_active_sessions gauge\n"
+		"microsocks_active_sessions %" PRIu64 "\n"
+		"# HELP microsocks_bytes_uploaded_total Total bytes uploaded from client to remote.\n"
+		"# TYPE microsocks_bytes_uploaded_total counter\n"
+		"microsocks_bytes_uploaded_total %" PRIu64 "\n"
+		"# HELP microsocks_bytes_downloaded_total Total bytes downloaded from remote to client.\n"
+		"# TYPE microsocks_bytes_downloaded_total counter\n"
+		"microsocks_bytes_downloaded_total %" PRIu64 "\n"
+		"# HELP microsocks_bytes_per_second Average bytes per second since process start.\n"
+		"# TYPE microsocks_bytes_per_second gauge\n"
+		"microsocks_bytes_per_second %.6f\n"
+		"# HELP microsocks_db_calls_total Number of measured DB calls from server request path.\n"
+		"# TYPE microsocks_db_calls_total counter\n"
+		"microsocks_db_calls_total %" PRIu64 "\n"
+		"# HELP microsocks_db_latency_seconds_avg Average measured DB latency in seconds.\n"
+		"# TYPE microsocks_db_latency_seconds_avg gauge\n"
+		"microsocks_db_latency_seconds_avg %.6f\n"
+		"# HELP microsocks_db_latency_seconds_max Max measured DB latency in seconds.\n"
+		"# TYPE microsocks_db_latency_seconds_max gauge\n"
+		"microsocks_db_latency_seconds_max %.6f\n",
+		auth_failures_total,
+		active_sessions,
+		bytes_up_total,
+		bytes_down_total,
+		bytes_per_sec,
+		db_calls_total,
+		db_latency_avg_seconds,
+		(double)db_latency_usec_max / 1000000.0);
+}
+
+static void *metrics_server_thread(void *unused) {
+	(void)unused;
+	struct server ms;
+	if(server_setup(&ms, metrics_listen_addr, (unsigned short)metrics_listen_port) != 0) {
+		dprintf(2, "metrics server_setup failed on %s:%u\n", metrics_listen_addr, metrics_listen_port);
+		return NULL;
+	}
+
+	for(;;) {
+		struct client c;
+		if(server_waitclient(&ms, &c) != 0) {
+			usleep(FAILURE_TIMEOUT);
+			continue;
+		}
+		char req[1024];
+		ssize_t n = recv(c.fd, req, sizeof(req)-1, 0);
+		if(n <= 0) {
+			close(c.fd);
+			continue;
+		}
+		req[n] = '\0';
+
+		const char *response_404 = "HTTP/1.1 404 Not Found\r\nContent-Length: 10\r\nConnection: close\r\n\r\nnot found\n";
+		const char *response_health = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n";
+		if(strncmp(req, "GET /metrics", 12) == 0) {
+			char body[4096];
+			int blen = metrics_build_text(body, sizeof(body));
+			if(blen < 0) blen = 0;
+			char header[256];
+			int hlen = snprintf(header, sizeof(header),
+				"HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+				blen);
+			write(c.fd, header, (size_t)hlen);
+			if(blen > 0) write(c.fd, body, (size_t)blen);
+		} else if(strncmp(req, "GET /healthz", 12) == 0 || strncmp(req, "GET /-/healthy", 14) == 0) {
+			write(c.fd, response_health, strlen(response_health));
+		} else {
+			write(c.fd, response_404, strlen(response_404));
+		}
+		close(c.fd);
+	}
+	return NULL;
 }
 
 static struct rl_entry *rl_get_slot(struct rl_entry *table, const char *key) {
@@ -236,6 +409,11 @@ static void read_config_file(const char *path, struct cfg *cfg) {
 			cfg->max_concurrent_per_account = parse_int_default(val, cfg->max_concurrent_per_account);
 		} else if(strcasecmp(key, "connections_retention_days") == 0) {
 			cfg->connections_retention_days = parse_int_default(val, cfg->connections_retention_days);
+		} else if(strcasecmp(key, "metrics_listen") == 0) {
+			strncpy(cfg->metrics_listen, val, sizeof(cfg->metrics_listen)-1);
+			cfg->metrics_listen[sizeof(cfg->metrics_listen)-1] = '\0';
+		} else if(strcasecmp(key, "metrics_port") == 0) {
+			cfg->metrics_port = (unsigned)parse_int_default(val, (int)cfg->metrics_port);
         }
     }
     fclose(f);
@@ -549,20 +727,33 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n, struct thr
 		return EC_NOT_ALLOWED;
 
 	/* Use database authentication */
-	t->account_id = db_account_auth(user, pass);
+	{
+		uint64_t db_started = metrics_db_start();
+		t->account_id = db_account_auth(user, pass);
+		metrics_db_finish(db_started);
+	}
 	if(t->account_id == -2) return EC_NOT_ALLOWED; /* account disabled */
 	if(t->account_id >= 0) {
 		/* Check whitelist */
-		if(!is_ip_allowed(t->account_id, client_ip)) {
+		uint64_t wl_db_started = metrics_db_start();
+		int wl_ok = is_ip_allowed(t->account_id, client_ip);
+		metrics_db_finish(wl_db_started);
+		if(!wl_ok) {
 			record_auth_failure(client_ip);
+			metrics_auth_failure_inc();
 			return EC_NOT_ALLOWED;
 		}
 		
 		/* Update last client IP */
-		db_account_update_last_ip(t->account_id, client_ip);
+		{
+			uint64_t db_started = metrics_db_start();
+			db_account_update_last_ip(t->account_id, client_ip);
+			metrics_db_finish(db_started);
+		}
 		return EC_SUCCESS;
 	}
 	record_auth_failure(client_ip);
+	metrics_auth_failure_inc();
 	return EC_NOT_ALLOWED;
 }
 
@@ -636,14 +827,22 @@ static void* clientthread(void *data) {
 			connection_status = "rate_limited";
 			close(remotefd);
 			remotefd = -1;
-		} else if(cfg_max_concurrent_per_account > 0 && db_account_get_online(t->account_id) >= cfg_max_concurrent_per_account) {
-			connection_status = "max_concurrent_exceeded";
-			close(remotefd);
-			remotefd = -1;
+		} else if(cfg_max_concurrent_per_account > 0) {
+			uint64_t db_started = metrics_db_start();
+			int online_now = db_account_get_online(t->account_id);
+			metrics_db_finish(db_started);
+			if(online_now >= cfg_max_concurrent_per_account) {
+				connection_status = "max_concurrent_exceeded";
+				close(remotefd);
+				remotefd = -1;
+			}
 		}
 	}
 	if(remotefd != -1 && t->account_id >= 0) {
-		if(account_monthly_quota_exceeded(t->account_id)) {
+		uint64_t quota_db_started = metrics_db_start();
+		int quota_exceeded = account_monthly_quota_exceeded(t->account_id);
+		metrics_db_finish(quota_db_started);
+		if(quota_exceeded) {
 			if(CONFIG_LOG) {
 				char clientname[256];
 				int af = SOCKADDR_UNION_AF(&t->client.addr);
@@ -655,8 +854,14 @@ static void* clientthread(void *data) {
 			connection_status = "bandwidth_limit_exceeded";
 			close(remotefd);
 			remotefd = -1;
-		} else if(db_account_update_online(t->account_id, +1) == SQLITE_OK) {
-			online_tracked = 1;
+		} else {
+			uint64_t db_started = metrics_db_start();
+			int online_rc = db_account_update_online(t->account_id, +1);
+			metrics_db_finish(db_started);
+			if(online_rc == SQLITE_OK) {
+				online_tracked = 1;
+				metrics_active_sessions_add(+1);
+			}
 		}
 	}
 	if(remotefd != -1) {
@@ -671,8 +876,12 @@ static void* clientthread(void *data) {
 				 clientname, t->dest[0] ? t->dest : "-", t->bytes_client_to_remote, t->bytes_remote_to_client);
 		}
 		/* Update bandwidth usage */
-		if(t->account_id >= 0)
+		if(t->account_id >= 0) {
+			uint64_t db_started = metrics_db_start();
 			db_account_update_bandwidth(t->account_id, t->bytes_client_to_remote, t->bytes_remote_to_client);
+			metrics_db_finish(db_started);
+		}
+		metrics_add_connection_bytes(t->bytes_client_to_remote, t->bytes_remote_to_client);
 		connection_status = "success";
 	} else {
 		if(CONFIG_LOG) {
@@ -690,11 +899,17 @@ static void* clientthread(void *data) {
 		char clientname[256];
 		void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
 		inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, clientname, sizeof clientname);
+		uint64_t db_started = metrics_db_start();
 		db_log_connection(t->account_id, clientname, t->dest[0] ? t->dest : "-",
 						 connection_status,
 						 t->bytes_client_to_remote, t->bytes_remote_to_client);
-		if(online_tracked)
+		metrics_db_finish(db_started);
+		if(online_tracked) {
+			uint64_t db_started = metrics_db_start();
 			db_account_update_online(t->account_id, -1);
+			metrics_db_finish(db_started);
+			metrics_active_sessions_add(-1);
+		}
 	}
 
 	close(t->client.fd);
@@ -736,7 +951,9 @@ static void print_config(const struct cfg *cfg) {
 		   "connect_rate_window_sec = %d\n"
 		   "connect_rate_limit = %d\n"
 		   "max_concurrent_per_account = %d\n"
-		   "connections_retention_days = %d\n",
+		   "connections_retention_days = %d\n"
+		   "metrics_listen = %s\n"
+		   "metrics_port = %u\n",
 		   cfg->listenip,
 		   cfg->port,
 		   cfg->quiet ? "true" : "false",
@@ -747,7 +964,9 @@ static void print_config(const struct cfg *cfg) {
 		   cfg->connect_rate_window_sec,
 		   cfg->connect_rate_limit,
 		   cfg->max_concurrent_per_account,
-		   cfg->connections_retention_days);
+		   cfg->connections_retention_days,
+		   cfg->metrics_listen,
+		   cfg->metrics_port);
 	exit(0);
 }
 
@@ -769,6 +988,8 @@ static int usage(void) {
 		"  connect_rate_limit = <count>\n"
 		"  max_concurrent_per_account = <count>\n"
 		"  connections_retention_days = <days>\n"
+		"  metrics_listen = <ip>    (metrics HTTP bind address, default 127.0.0.1)\n"
+		"  metrics_port = <port>    (metrics HTTP port, 0 disables endpoint)\n"
 		"\n"
 		"CLI flags override values in the config file. If no config is found, sane\n"
 		"defaults are used: quiet=false, listen=0.0.0.0, port=1080, database is\n"
@@ -826,6 +1047,9 @@ int main(int argc, char** argv) {
 	cfg.connect_rate_limit = 60;
 	cfg.max_concurrent_per_account = 3;
 	cfg.connections_retention_days = 90;
+	strncpy(cfg.metrics_listen, "127.0.0.1", sizeof(cfg.metrics_listen)-1);
+	cfg.metrics_listen[sizeof(cfg.metrics_listen)-1] = '\0';
+	cfg.metrics_port = 0;
 	default_dbpath(cfg.dbpath, sizeof(cfg.dbpath));
 
 	/* read config file if present */
@@ -903,6 +1127,10 @@ int main(int argc, char** argv) {
 	cfg_connect_rate_limit = cfg.connect_rate_limit;
 	cfg_max_concurrent_per_account = cfg.max_concurrent_per_account;
 	cfg_connections_retention_days = cfg.connections_retention_days;
+	strncpy(metrics_listen_addr, cfg.metrics_listen, sizeof(metrics_listen_addr)-1);
+	metrics_listen_addr[sizeof(metrics_listen_addr)-1] = '\0';
+	metrics_listen_port = cfg.metrics_port;
+	metrics_server_enabled = (metrics_listen_port > 0);
 	
 	/* Setup signal handlers */
 	signal(SIGPIPE, SIG_IGN);
@@ -924,6 +1152,18 @@ int main(int argc, char** argv) {
 	if(!dbpath[0]) {
 		fprintf(stderr, "invalid database path\n");
 		return 1;
+	}
+	if(metrics_server_enabled) {
+		if(metrics_listen_port == 0 || metrics_listen_port > 65535) {
+			fprintf(stderr, "invalid metrics port value: %u\n", metrics_listen_port);
+			return 1;
+		}
+		struct addrinfo *minfo = NULL;
+		if(resolve(metrics_listen_addr, (unsigned short)metrics_listen_port, &minfo) != 0) {
+			fprintf(stderr, "invalid metrics listen address: %s\n", metrics_listen_addr);
+			return 1;
+		}
+		if(minfo) freeaddrinfo(minfo);
 	}
 
 	/* Setup logfile if requested (CLI overrides config) */
@@ -953,6 +1193,16 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "Failed to initialize database at %s\n", dbpath);
 		return 1;
 	}
+	g_metrics.started_at = time(NULL);
+	if(metrics_server_enabled) {
+		pthread_t mt;
+		if(pthread_create(&mt, NULL, metrics_server_thread, NULL) == 0) {
+			pthread_detach(mt);
+			dolog("metrics endpoint enabled on http://%s:%u/metrics\n", metrics_listen_addr, metrics_listen_port);
+		} else {
+			fprintf(stderr, "failed to start metrics thread\n");
+		}
+	}
 
 	struct server s;
 	sblist *threads = sblist_new(sizeof (struct thread*), 8);
@@ -969,16 +1219,23 @@ int main(int argc, char** argv) {
 		collect(threads);
 		time_t loop_now = time(NULL);
 		if(cfg_connections_retention_days > 0 && (last_connections_prune == 0 || loop_now - last_connections_prune >= 3600)) {
+			uint64_t db_started = metrics_db_start();
 			if(db_prune_connections_older_than_days(cfg_connections_retention_days) == SQLITE_OK) {
+				metrics_db_finish(db_started);
 				dolog("pruned connections older than %d days\n", cfg_connections_retention_days);
+			} else {
+				metrics_db_finish(db_started);
 			}
 			last_connections_prune = loop_now;
 		}
 		int month_key = current_month_key(time(NULL));
 		if(last_reset_month != -1 && month_key != -1 && month_key != last_reset_month) {
+			uint64_t db_started2 = metrics_db_start();
 			if(db_reset_monthly_stats() == SQLITE_OK) {
+				metrics_db_finish(db_started2);
 				dolog("monthly bandwidth counters reset for month=%d\n", month_key);
 			} else {
+				metrics_db_finish(db_started2);
 				dolog("failed to reset monthly bandwidth counters for month=%d\n", month_key);
 			}
 			last_reset_month = month_key;
