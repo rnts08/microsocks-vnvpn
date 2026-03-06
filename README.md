@@ -172,12 +172,12 @@ Deployment Readiness: TODO List
 The project is functional, but the following work should be done before production deployment:
 
 1. ✅ Added hardened systemd unit example at `contrib/systemd/microsocks.service` (dedicated user/group, `ProtectSystem`, `NoNewPrivileges`, `PrivateTmp`, capability bounding, and explicit writable paths).
-2. Provide a documented backup/restore strategy for SQLite (hot backups, retention, restore drill).
-3. Add database maintenance guidance (`VACUUM`, WAL checkpoint policy, log retention/rotation for `connections`).
+2. ✅ Provide a documented backup/restore strategy for SQLite (hot backups, retention, restore drill) in `OPERATIONS_RUNBOOK.md`.
+3. ✅ Add database maintenance guidance (`VACUUM`, WAL checkpoint policy, log retention/rotation for `connections`) in `OPERATIONS_RUNBOOK.md`.
 4. ✅ Added Prometheus metrics endpoint (`/metrics`) with auth failures, active sessions, bytes/sec, and DB latency; plus `/healthz`.
 5. Add integration tests for end-to-end SOCKS5 auth + accounting under concurrent load.
 6. Add load/performance sizing guide (expected users/throughput vs CPU, memory, and disk I/O).
-7. Add release/versioned upgrade playbook (schema migrations, rollback steps).
+7. ✅ Add release/versioned operator upgrade/rollback playbook in `OPERATIONS_RUNBOOK.md`.
 8. Add a production security guide for the Flask admin (reverse proxy TLS, network ACLs, secret management, optional SSO).
 
 Known Fix List (Code-Level Gaps)
