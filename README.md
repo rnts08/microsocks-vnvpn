@@ -102,7 +102,7 @@ Deployment Readiness: TODO List
 
 The project is functional, but the following work should be done before production deployment:
 
-1. Add proper service hardening docs and examples (systemd sandboxing, dedicated user/group, `ProtectSystem`, `NoNewPrivileges`, `PrivateTmp`).
+1. ✅ Added hardened systemd unit example at `contrib/systemd/microsocks.service` (dedicated user/group, `ProtectSystem`, `NoNewPrivileges`, `PrivateTmp`, capability bounding, and explicit writable paths).
 2. Provide a documented backup/restore strategy for SQLite (hot backups, retention, restore drill).
 3. Add database maintenance guidance (`VACUUM`, WAL checkpoint policy, log retention/rotation for `connections`).
 4. Add observability endpoints or metrics export (Prometheus/textfile) for auth failures, active sessions, bytes/sec, and DB latency.
