@@ -4,7 +4,8 @@
 
 - [x] Create a hardened production systemd unit (least privilege, filesystem restrictions, capability bounding).
   - Added at `contrib/systemd/microsocks.service` with dedicated service user, restart policy, and systemd hardening directives.
-- [ ] Document a full operational runbook (start/stop/reload, log rotation, backup/restore, incident response).
+- [x] Document a full operational runbook (start/stop/reload, log rotation, backup/restore, incident response).
+  - Added `OPERATIONS_RUNBOOK.md` with service lifecycle, DB backup/restore, retention, maintenance, and incident-response playbooks.
 - [ ] Add automated integration tests for SOCKS5 auth, relay correctness, and accounting updates.
 - [ ] Add concurrency/load testing and define supported capacity targets.
 - [ ] Add migration/versioning strategy for schema evolution (with rollback plan).
