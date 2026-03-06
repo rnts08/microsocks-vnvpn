@@ -114,29 +114,18 @@ The project is functional, but the following work should be done before producti
 Known Fix List (Code-Level Gaps)
 --------------------------------
 
-1. **Monthly quota enforcement happens too early.**
-   The quota check in `clientthread()` runs before authentication sets `t->account_id`, so it is effectively skipped. Move quota enforcement to immediately after successful auth and before CONNECT relay.
-
-2. **`online` counter is never maintained.**
-   Schema and admin UI expose `online`, but server code does not increment/decrement it on connect/disconnect.
-
-3. **Monthly reset is not scheduled.**
-   `db_reset_monthly_stats()` exists but is not invoked by server runtime. Add scheduler/cron integration or periodic in-process reset.
-
-4. **No indexes on high-traffic query paths.**
-   Add indexes such as `connections(account_id, ts_timestamp)` and `connections(ts_timestamp)` for admin pages/stats scalability.
-
-5. **Whitelist format is a comma-separated text field.**
+1. **Whitelist format is a comma-separated text field.**
    This is simple but brittle for management/auditing. Consider a normalized `account_whitelist` table with one row per IP/CIDR.
 
-6. **Server-side rate limiting / abuse protection is absent.**
+2. **Server-side rate limiting / abuse protection is absent.**
    Add controls for auth brute force, per-IP connection rate, and max concurrent sessions per account.
 
-7. **Flask admin defaults are unsafe for production if unchanged.**
+3. **Flask admin defaults are unsafe for production if unchanged.**
    It starts in debug mode and defaults to `admin/admin` + weak secret fallback. Force explicit secrets in production profile.
 
-8. **Connection-log retention policy is not implemented.**
+4. **Connection-log retention policy is not implemented.**
    `connections` can grow without bounds; add retention/archival and cleanup tooling.
+
 
 Notes
 -----

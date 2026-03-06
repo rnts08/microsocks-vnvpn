@@ -13,10 +13,6 @@
 
 ## FIX list (identified code/product issues)
 
-- [ ] Fix bandwidth-limit check ordering in `sockssrv.c` (currently checked before auth sets account id).
-- [ ] Implement `online` connection tracking in server runtime and keep DB field accurate.
-- [ ] Invoke monthly reset (`db_reset_monthly_stats`) on schedule (internal scheduler or external job).
-- [ ] Add SQLite indexes for high-frequency admin queries and historical stats.
 - [ ] Replace/augment CSV whitelist storage with normalized per-account whitelist table.
 - [ ] Add anti-abuse controls: auth rate limiting, per-IP and per-account connection caps.
 - [ ] Enforce secure admin defaults (disable debug in prod, require non-default credentials/secrets).
