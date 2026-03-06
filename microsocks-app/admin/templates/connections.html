@@ -3,6 +3,24 @@
 <div class="container mt-4">
   <h2 class="mb-3">Connections</h2>
 
+
+  <div class="mb-3">
+    <div class="alert alert-info py-2 mb-0">
+      Retention policy: 
+      {% if connection_retention_days > 0 %}
+        keep the last <strong>{{ connection_retention_days }}</strong> day(s) of connection logs.
+      {% else %}
+        disabled (set <code>CONNECTION_RETENTION_DAYS</code> to enable automatic cleanup).
+      {% endif %}
+      {% if is_admin and connection_retention_days > 0 %}
+      <form method="post" action="{{ url_for('run_retention_now') }}" class="d-inline ms-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-sm btn-outline-primary" type="submit">Run cleanup now</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+
 <div class="row mb-4 align-items-center">
   <!-- Totals (left, larger) -->
   <div class="col-lg-8 col-md-7 mb-3 mb-md-0">
