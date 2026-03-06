@@ -2,7 +2,8 @@
 
 ## TODO (to make service fully deployable)
 
-- [ ] Create a hardened production systemd unit (least privilege, filesystem restrictions, capability bounding).
+- [x] Create a hardened production systemd unit (least privilege, filesystem restrictions, capability bounding).
+  - Added at `contrib/systemd/microsocks.service` with dedicated service user, restart policy, and systemd hardening directives.
 - [ ] Document a full operational runbook (start/stop/reload, log rotation, backup/restore, incident response).
 - [ ] Add automated integration tests for SOCKS5 auth, relay correctness, and accounting updates.
 - [ ] Add concurrency/load testing and define supported capacity targets.

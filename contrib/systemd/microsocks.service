@@ -4,11 +4,41 @@ After=network.target
 
 [Service]
 Type=simple
-# Adjust User/Group to match your runtime user
-User=nobody
-Group=nogroup
+# Create a dedicated service user/group for production deployments.
+User=microsocks
+Group=microsocks
 ExecStart=/usr/local/bin/microsocks -f /etc/microsocks/microsocks.conf
 Restart=on-failure
+RestartSec=2s
+
+# Keep writable state/log locations explicit.
+StateDirectory=microsocks
+LogsDirectory=microsocks
+RuntimeDirectory=microsocks
+
+# Reduce process privileges.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Restrict filesystem visibility/mutation.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectClock=true
+ReadWritePaths=/var/lib/microsocks /var/log/microsocks
+
+# Restrict networking/address families to what the service needs.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Optional: add systemd-level network ACLs here if your deployment needs them.
+# (Not enabled by default because this proxy must connect to remote destinations.)
 
 [Install]
 WantedBy=multi-user.target
