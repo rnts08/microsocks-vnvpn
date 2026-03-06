@@ -1,21 +1,33 @@
-# Deployment TODO and Fix List
+# Deployment TODO
 
-## TODO (to make service fully deployable)
+This file tracks **remaining** work for production hardening and deployment planning.
+Completed/fixed items are intentionally removed to keep this focused on open tasks.
 
-- [x] Create a hardened production systemd unit (least privilege, filesystem restrictions, capability bounding).
-  - Added at `contrib/systemd/microsocks.service` with dedicated service user, restart policy, and systemd hardening directives.
-- [x] Document a full operational runbook (start/stop/reload, log rotation, backup/restore, incident response).
-  - Added `OPERATIONS_RUNBOOK.md` with service lifecycle, DB backup/restore, retention, maintenance, and incident-response playbooks.
-- [ ] Add automated integration tests for SOCKS5 auth, relay correctness, and accounting updates.
-- [ ] Add concurrency/load testing and define supported capacity targets.
-- [ ] Add migration/versioning strategy for schema evolution (with rollback plan).
-- [x] Define data retention policy and implement periodic cleanup for `connections`.
-- [ ] Add monitoring/alerting integration (service health, auth failures, DB growth, error rates).
-- [ ] Add containerization/deployment examples (Docker/Compose/Kubernetes optional).
+## Open deployment tasks
 
-## FIX list (identified code/product issues)
+- [ ] Add concurrency/load testing with documented capacity targets (CPU, memory, disk I/O).
+- [ ] Add monitoring/alerting deployment examples (Prometheus scrape + baseline alerts for auth failures, error rates, DB growth).
+- [ ] Add containerized deployment examples (Docker/Compose, optional Kubernetes).
+- [ ] Add a production security guide for Flask admin deployment (TLS termination, network ACLs, secret rotation, optional SSO).
 
-- [x] Replace/augment CSV whitelist storage with normalized per-account whitelist table.
-- [x] Add anti-abuse controls: auth rate limiting, per-IP and per-account connection caps.
-- [x] Enforce secure admin defaults (debug disabled by default; require non-default credentials/secrets unless `ALLOW_INSECURE_DEFAULTS=1`).
-- [x] Add pruning/archival utility for `connections` table to prevent unbounded growth.
+## Current database layout (reference)
+
+SQLite schema currently in use:
+
+- `accounts`: user identity/auth data, enable flag, timestamps, bandwidth quota, monthly/lifetime counters, online count.
+- `connections`: per-connection logs with source/destination, status, byte counters, timestamp.
+- `account_whitelist`: normalized per-account whitelist entries (`ip_cidr`) with uniqueness on (`account_id`, `ip_cidr`).
+
+Indexes:
+
+- `idx_connections_account_ts` on `connections(account_id, ts_timestamp)`
+- `idx_connections_ts` on `connections(ts_timestamp)`
+- `idx_account_whitelist_account` on `account_whitelist(account_id)`
+
+## Tests currently performed
+
+- `tests/test_install.sh`: build + install smoke test.
+- `tests/msadmin_smoketest.sh`: account CRUD smoke test.
+- `tests/migrate_smoketest.sh`: migration smoke test (plaintext -> hashed + log output).
+- `tests/test_sighup.sh`: logfile reopen behavior on `SIGHUP`.
+- `tests/test_socks5_accounting_concurrent.py`: concurrent end-to-end SOCKS5 auth/relay/accounting integration test.

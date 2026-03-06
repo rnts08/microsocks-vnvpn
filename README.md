@@ -29,18 +29,30 @@ Implemented Functionality
   - Lifetime counters (`total_bytes_sent`, `total_bytes_received`)
 - Connection logs persisted in `connections` with destination, status, and byte counts.
 
-### Data model (SQLite)
+### Database layout (SQLite)
 
-Server/admin schema includes:
+The server auto-creates and maintains this schema:
 
-- `accounts`:
-  - identity: `id`, `username`, `password`
-  - access: `enabled`, `whitelist`, `last_client_ip`
-  - timestamps: `ts_created`, `ts_updated`, `ts_seen`
-  - quotas/accounting: `monthly_bandwidth`, monthly + lifetime byte counters, `online`
-- `connections`:
-  - `account_id`, `client_ip`, `destination`, `status`
+- `accounts`
+  - Identity/auth: `id`, `username` (unique), `password` (Argon2 hash)
+  - Access control: `enabled`, `last_client_ip`
+  - Legacy compatibility: `whitelist` (CSV field still read/written)
+  - Timestamps: `ts_created`, `ts_updated`, `ts_seen`
+  - Quotas/accounting: `monthly_bandwidth`, `m_bytes_sent`, `m_bytes_received`,
+    `total_bytes_sent`, `total_bytes_received`, `online`
+- `connections`
+  - `id`, `account_id` (FK -> `accounts.id`), `client_ip`, `destination`, `status`
   - `bytes_sent`, `bytes_received`, `ts_timestamp`
+  - Indexes:
+    - `idx_connections_account_ts` on (`account_id`, `ts_timestamp`)
+    - `idx_connections_ts` on (`ts_timestamp`)
+- `account_whitelist`
+  - Normalized whitelist entries: `id`, `account_id`, `ip_cidr`, `ts_created`
+  - Uniqueness: (`account_id`, `ip_cidr`)
+  - FK delete behavior: `ON DELETE CASCADE`
+  - Index: `idx_account_whitelist_account` on (`account_id`)
+
+SQLite is opened with `PRAGMA journal_mode=WAL` for better concurrency.
 
 ### Password handling
 
@@ -166,34 +178,25 @@ If Prometheus runs on a different host, bind metrics to a reachable interface or
 - Unexpectedly low active sessions (service degradation signal):
   - `microsocks_active_sessions == 0` (only where traffic is expected)
 
-Deployment Readiness: TODO List
--------------------------------
+Test coverage
+-------------
 
-The project is functional, but the following work should be done before production deployment:
+The repository includes these automated tests/checks:
 
-1. ✅ Added hardened systemd unit example at `contrib/systemd/microsocks.service` (dedicated user/group, `ProtectSystem`, `NoNewPrivileges`, `PrivateTmp`, capability bounding, and explicit writable paths).
-2. ✅ Provide a documented backup/restore strategy for SQLite (hot backups, retention, restore drill) in `OPERATIONS_RUNBOOK.md`.
-3. ✅ Add database maintenance guidance (`VACUUM`, WAL checkpoint policy, log retention/rotation for `connections`) in `OPERATIONS_RUNBOOK.md`.
-4. ✅ Added Prometheus metrics endpoint (`/metrics`) with auth failures, active sessions, bytes/sec, and DB latency; plus `/healthz`.
-5. ✅ Added integration test `tests/test_socks5_accounting_concurrent.py` for end-to-end SOCKS5 auth + accounting under concurrent load.
-6. Add load/performance sizing guide (expected users/throughput vs CPU, memory, and disk I/O).
-7. ✅ Add release/versioned operator upgrade/rollback playbook in `OPERATIONS_RUNBOOK.md`.
-8. Add a production security guide for the Flask admin (reverse proxy TLS, network ACLs, secret management, optional SSO).
+- `tests/test_install.sh`
+  - Builds binaries and verifies `make install DESTDIR=...` installs
+    `etc/microsocks/microsocks.conf`.
+- `tests/msadmin_smoketest.sh`
+  - Exercises `msadmin` account lifecycle: add, list, show, delete.
+- `tests/migrate_smoketest.sh`
+  - Verifies `msadmin migrate` hashes plaintext passwords and writes a migration log.
+- `tests/test_sighup.sh`
+  - Verifies `microsocks` reopens logfiles correctly after `SIGHUP`.
+- `tests/test_socks5_accounting_concurrent.py`
+  - End-to-end concurrent SOCKS5 auth + relay/accounting test with many parallel
+    requests through the proxy and DB counter verification.
 
-Known Fix List (Code-Level Gaps)
---------------------------------
-
-1. **Whitelist format is a comma-separated text field.**
-   ✅ Implemented normalized `account_whitelist` table (one row per account/IP), while maintaining compatibility with legacy CSV `accounts.whitelist` reads/writes.
-
-2. **Server-side rate limiting / abuse protection is absent.**
-   ✅ Implemented controls for auth brute-force (per-IP failed auth window), per-IP connection rate, and max concurrent sessions per account.
-
-3. **Flask admin now enforces safer startup defaults.**
-   It refuses to start with `admin/admin`, empty password, or weak/default `SECRET_KEY`, and debug is opt-in via `FLASK_DEBUG=1`.
-
-4. **Connection-log retention policy is not implemented.**
-   ✅ Implemented server-side periodic pruning using configurable `connections_retention_days`.
+For remaining deployment/planning work, see `DEPLOYMENT_TODO.md`.
 
 
 Notes
