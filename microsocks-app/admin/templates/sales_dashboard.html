@@ -1,0 +1,80 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2 class="mb-3">Sales Dashboard</h2>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">Total Orders</div><div class="fs-4">{{ kpis.total_orders }}</div></div></div></div>
+  <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">Paid Orders</div><div class="fs-4">{{ kpis.paid_orders }}</div></div></div></div>
+  <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">Pending Orders</div><div class="fs-4">{{ kpis.pending_orders }}</div></div></div></div>
+  <div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">Paid Transactions</div><div class="fs-4">{{ kpis.paid_transactions }}</div></div></div></div>
+  <div class="col-md-4"><div class="card"><div class="card-body"><div class="text-muted small">Total Revenue</div><div class="fs-4">${{ '%.2f' % (kpis.total_revenue_cents / 100) }}</div></div></div></div>
+  <div class="col-md-4"><div class="card"><div class="card-body"><div class="text-muted small">Revenue This Month</div><div class="fs-4">${{ '%.2f' % (kpis.month_revenue_cents / 100) }}</div></div></div></div>
+  <div class="col-md-4"><div class="card"><div class="card-body"><div class="text-muted small">Active Packages</div><div class="fs-4">{{ kpis.active_packages }} / {{ kpis.total_packages }}</div></div></div></div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-6">
+    <div class="card">
+      <div class="card-header">Revenue (Last 30 Days)</div>
+      <div class="card-body"><canvas id="revenueChart" height="130"></canvas></div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card">
+      <div class="card-header">Top Packages</div>
+      <div class="card-body">
+        <table class="table table-sm">
+          <thead><tr><th>Package</th><th>Units</th><th>Sales</th></tr></thead>
+          <tbody>{% for r in top_packages %}<tr><td>{{ r.name }}</td><td>{{ r.units }}</td><td>${{ '%.2f' % (r.sales_cents / 100) }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-6">
+    <div class="card">
+      <div class="card-header">Payment Method Split</div>
+      <div class="card-body">
+        <table class="table table-sm">
+          <thead><tr><th>Method</th><th>Count</th><th>Amount</th></tr></thead>
+          <tbody>{% for r in method_split %}<tr><td>{{ r.payment_method }}</td><td>{{ r.tx_count }}</td><td>${{ '%.2f' % (r.amount_cents / 100) }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card">
+      <div class="card-header">Recent Orders</div>
+      <div class="card-body">
+        <table class="table table-sm">
+          <thead><tr><th>Order</th><th>User</th><th>Package</th><th>Status</th><th>Total</th></tr></thead>
+          <tbody>{% for r in recent_orders %}<tr><td>{{ r.order_number }}</td><td>{{ r.username or 'guest' }}</td><td>{{ r.package_name }}</td><td>{{ r.status }}</td><td>${{ '%.2f' % (r.total_cents / 100) }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+const revenueLabels = {{ revenue_labels | tojson }};
+const revenueValues = {{ revenue_values | tojson }}.map(v => v / 100.0);
+new Chart(document.getElementById('revenueChart'), {
+  type: 'line',
+  data: {
+    labels: revenueLabels,
+    datasets: [{
+      label: 'Revenue ($)',
+      data: revenueValues,
+      borderColor: 'rgb(25, 135, 84)',
+      backgroundColor: 'rgba(25, 135, 84, 0.2)',
+      fill: true,
+      tension: 0.25
+    }]
+  },
+  options: { responsive: true, scales: { y: { beginAtZero: true } } }
+});
+</script>
+{% endblock %}

@@ -174,6 +174,57 @@ CREATE TABLE IF NOT EXISTS admin_login_attempts (
   success INTEGER NOT NULL,
   ts_attempt INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS packages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  quota_bytes INTEGER NOT NULL DEFAULT 0,
+  duration_days INTEGER NOT NULL DEFAULT 30,
+  price_cents INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  ts_created INTEGER NOT NULL,
+  ts_updated INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_number TEXT UNIQUE NOT NULL,
+  account_id INTEGER,
+  package_id INTEGER NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 1,
+  subtotal_cents INTEGER NOT NULL,
+  discount_cents INTEGER NOT NULL DEFAULT 0,
+  total_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  status TEXT NOT NULL DEFAULT 'pending',
+  ts_created INTEGER NOT NULL,
+  ts_updated INTEGER NOT NULL,
+  FOREIGN KEY(account_id) REFERENCES accounts(id),
+  FOREIGN KEY(package_id) REFERENCES packages(id)
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  provider TEXT,
+  provider_txn_id TEXT,
+  payment_method TEXT,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  status TEXT NOT NULL,
+  paid_at INTEGER,
+  ts_created INTEGER NOT NULL,
+  ts_updated INTEGER NOT NULL,
+  FOREIGN KEY(order_id) REFERENCES orders(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_account_id ON orders(account_id);
+CREATE INDEX IF NOT EXISTS idx_orders_package_id ON orders(package_id);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_transactions_order_id ON transactions(order_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
 '''
 
 
@@ -581,6 +632,162 @@ def list_connections():
         totals=totals,
         monthly_totals=monthly_totals,
         connection_retention_days=CONNECTION_RETENTION_DAYS,
+    )
+
+
+@app.route('/packages', methods=['GET', 'POST'])
+@require_login(role='admin')
+def list_packages():
+    db = get_db()
+    if request.method == 'POST':
+        code = request.form.get('code', '').strip()
+        name = request.form.get('name', '').strip()
+        description = request.form.get('description', '').strip()
+        quota_bytes = request.form.get('quota_bytes', '0').strip()
+        duration_days = request.form.get('duration_days', '30').strip()
+        price_cents = request.form.get('price_cents', '0').strip()
+        active = 1 if request.form.get('active') == 'on' else 0
+
+        if not code or not name:
+            flash('Package code and name are required.', 'error')
+            return redirect(url_for('list_packages'))
+
+        try:
+            quota_bytes_i = max(int(quota_bytes), 0)
+            duration_days_i = max(int(duration_days), 1)
+            price_cents_i = max(int(price_cents), 0)
+        except ValueError:
+            flash('Invalid numeric package values.', 'error')
+            return redirect(url_for('list_packages'))
+
+        now = int(time.time())
+        try:
+            db.execute(
+                '''INSERT INTO packages(code, name, description, quota_bytes, duration_days, price_cents, active, ts_created, ts_updated)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (code, name, description, quota_bytes_i, duration_days_i, price_cents_i, active, now, now),
+            )
+            db.commit()
+            flash('Package created.', 'success')
+        except sqlite3.IntegrityError:
+            flash('Package code already exists.', 'error')
+        return redirect(url_for('list_packages'))
+
+    rows = db.execute(
+        '''SELECT id, code, name, description, quota_bytes, duration_days, price_cents, active,
+                  datetime(ts_created, 'unixepoch') AS created
+           FROM packages
+           ORDER BY active DESC, price_cents ASC, name ASC'''
+    ).fetchall()
+    return render_template('packages.html', rows=rows)
+
+
+@app.route('/orders')
+@require_login()
+def list_orders():
+    db = get_db()
+    rows = db.execute(
+        '''SELECT o.id, o.order_number, o.quantity, o.total_cents, o.currency, o.status,
+                  datetime(o.ts_created, 'unixepoch') AS created,
+                  a.username,
+                  p.name AS package_name
+           FROM orders o
+           LEFT JOIN accounts a ON a.id = o.account_id
+           JOIN packages p ON p.id = o.package_id
+           ORDER BY o.ts_created DESC
+           LIMIT 200'''
+    ).fetchall()
+    return render_template('orders.html', rows=rows)
+
+
+@app.route('/transactions')
+@require_login()
+def list_transactions():
+    db = get_db()
+    rows = db.execute(
+        '''SELECT t.id, t.provider, t.provider_txn_id, t.payment_method, t.amount_cents, t.currency,
+                  t.status, datetime(t.paid_at, 'unixepoch') AS paid_at,
+                  datetime(t.ts_created, 'unixepoch') AS created,
+                  o.order_number
+           FROM transactions t
+           JOIN orders o ON o.id = t.order_id
+           ORDER BY t.ts_created DESC
+           LIMIT 200'''
+    ).fetchall()
+    return render_template('transactions.html', rows=rows)
+
+
+@app.route('/sales')
+@require_login()
+def sales_dashboard():
+    db = get_db()
+    now = int(time.time())
+    month_start = int(time.mktime(time.strptime(time.strftime('%Y-%m-01'), '%Y-%m-%d')))
+
+    kpis = db.execute(
+        '''SELECT
+             (SELECT COUNT(*) FROM orders) AS total_orders,
+             (SELECT COUNT(*) FROM orders WHERE status = 'paid') AS paid_orders,
+             (SELECT COUNT(*) FROM orders WHERE status = 'pending') AS pending_orders,
+             (SELECT COUNT(*) FROM transactions WHERE status IN ('paid', 'succeeded')) AS paid_transactions,
+             (SELECT COALESCE(SUM(amount_cents), 0) FROM transactions WHERE status IN ('paid', 'succeeded')) AS total_revenue_cents,
+             (SELECT COALESCE(SUM(amount_cents), 0) FROM transactions WHERE status IN ('paid', 'succeeded') AND COALESCE(paid_at, ts_created) >= ?) AS month_revenue_cents,
+             (SELECT COUNT(*) FROM packages WHERE active = 1) AS active_packages,
+             (SELECT COUNT(*) FROM packages) AS total_packages''',
+        (month_start,),
+    ).fetchone()
+
+    top_packages = db.execute(
+        '''SELECT p.name, SUM(o.quantity) AS units, SUM(o.total_cents) AS sales_cents
+           FROM orders o
+           JOIN packages p ON p.id = o.package_id
+           WHERE o.status IN ('paid', 'fulfilled')
+           GROUP BY p.id, p.name
+           ORDER BY sales_cents DESC
+           LIMIT 5'''
+    ).fetchall()
+
+    method_split = db.execute(
+        '''SELECT COALESCE(NULLIF(payment_method, ''), 'unknown') AS payment_method,
+                  COUNT(*) AS tx_count,
+                  COALESCE(SUM(amount_cents), 0) AS amount_cents
+           FROM transactions
+           WHERE status IN ('paid', 'succeeded')
+           GROUP BY COALESCE(NULLIF(payment_method, ''), 'unknown')
+           ORDER BY amount_cents DESC'''
+    ).fetchall()
+
+    recent_orders = db.execute(
+        '''SELECT o.order_number, o.status, o.total_cents, o.currency,
+                  datetime(o.ts_created, 'unixepoch') AS created,
+                  a.username,
+                  p.name AS package_name
+           FROM orders o
+           LEFT JOIN accounts a ON a.id = o.account_id
+           JOIN packages p ON p.id = o.package_id
+           ORDER BY o.ts_created DESC
+           LIMIT 10'''
+    ).fetchall()
+
+    revenue_daily = db.execute(
+        '''SELECT date(datetime(COALESCE(paid_at, ts_created), 'unixepoch')) AS day,
+                  COALESCE(SUM(amount_cents), 0) AS amount_cents
+           FROM transactions
+           WHERE status IN ('paid', 'succeeded')
+             AND COALESCE(paid_at, ts_created) >= ?
+           GROUP BY day
+           ORDER BY day ASC''',
+        (now - (30 * 24 * 3600),),
+    ).fetchall()
+
+    return render_template(
+        'sales_dashboard.html',
+        kpis=kpis,
+        top_packages=top_packages,
+        method_split=method_split,
+        recent_orders=recent_orders,
+        revenue_labels=[r['day'] for r in revenue_daily],
+        revenue_values=[r['amount_cents'] for r in revenue_daily],
     )
 
 

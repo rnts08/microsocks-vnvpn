@@ -11,7 +11,11 @@ Minimal web administration UI for the MicroSocks SQLite database.
 - Add/update/delete users.
 - Update per-user monthly bandwidth and whitelist.
 - JSON responses for list/detail/stat routes when requested.
+<<<<<<< codex/update-frontend-for-dynamic-api-data
 - Public JSON catalog endpoint (`/api/public/catalog`) for static sales frontend package/currency data.
+=======
+- Includes sales modules backed by SQLite tables for `packages`, `orders`, and `transactions` with a sales dashboard.
+>>>>>>> master
 
 ## Important behavior
 
