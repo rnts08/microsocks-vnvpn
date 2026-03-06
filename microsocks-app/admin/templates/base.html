@@ -26,7 +26,11 @@
             {% if admin_user %}
               <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Accounts</a></li>
               <li class="nav-item"><a class="nav-link" href="{{ url_for('list_connections') }}">Connections</a></li>
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('sales_dashboard') }}">Sales</a></li>
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('list_orders') }}">Orders</a></li>
+              <li class="nav-item"><a class="nav-link" href="{{ url_for('list_transactions') }}">Transactions</a></li>
               {% if is_admin %}
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('list_packages') }}">Packages</a></li>
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('add_user') }}">Add Account</a></li>
               {% endif %}
               <li class="nav-item text-light px-lg-2 small">{{ admin_user }} ({{ admin_role }})</li>

@@ -11,6 +11,7 @@ Minimal web administration UI for the MicroSocks SQLite database.
 - Add/update/delete users.
 - Update per-user monthly bandwidth and whitelist.
 - JSON responses for list/detail/stat routes when requested.
+- Includes sales modules backed by SQLite tables for `packages`, `orders`, and `transactions` with a sales dashboard.
 
 ## Important behavior
 

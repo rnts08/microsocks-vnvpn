@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2 class="mb-3">Transactions / Payments</h2>
+<div class="table-responsive">
+  <table class="table table-striped table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Order #</th><th>Provider</th><th>Provider Txn</th><th>Method</th><th>Amount</th><th>Status</th><th>Paid At</th><th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.order_number }}</td>
+        <td>{{ r.provider or '-' }}</td>
+        <td>{{ r.provider_txn_id or '-' }}</td>
+        <td>{{ r.payment_method or '-' }}</td>
+        <td>{{ r.currency }} ${{ '%.2f' % (r.amount_cents / 100) }}</td>
+        <td>{{ r.status }}</td>
+        <td>{{ r.paid_at or '-' }}</td>
+        <td>{{ r.created }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

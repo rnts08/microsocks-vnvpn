@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2 class="mb-3">Orders</h2>
+<div class="table-responsive">
+  <table class="table table-striped table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Order #</th><th>Account</th><th>Package</th><th>Qty</th><th>Total</th><th>Status</th><th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.order_number }}</td>
+        <td>{{ r.username or 'guest' }}</td>
+        <td>{{ r.package_name }}</td>
+        <td>{{ r.quantity }}</td>
+        <td>{{ r.currency }} ${{ '%.2f' % (r.total_cents / 100) }}</td>
+        <td>{{ r.status }}</td>
+        <td>{{ r.created }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
