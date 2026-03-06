@@ -175,7 +175,7 @@ The project is functional, but the following work should be done before producti
 2. ✅ Provide a documented backup/restore strategy for SQLite (hot backups, retention, restore drill) in `OPERATIONS_RUNBOOK.md`.
 3. ✅ Add database maintenance guidance (`VACUUM`, WAL checkpoint policy, log retention/rotation for `connections`) in `OPERATIONS_RUNBOOK.md`.
 4. ✅ Added Prometheus metrics endpoint (`/metrics`) with auth failures, active sessions, bytes/sec, and DB latency; plus `/healthz`.
-5. Add integration tests for end-to-end SOCKS5 auth + accounting under concurrent load.
+5. ✅ Added integration test `tests/test_socks5_accounting_concurrent.py` for end-to-end SOCKS5 auth + accounting under concurrent load.
 6. Add load/performance sizing guide (expected users/throughput vs CPU, memory, and disk I/O).
 7. ✅ Add release/versioned operator upgrade/rollback playbook in `OPERATIONS_RUNBOOK.md`.
 8. Add a production security guide for the Flask admin (reverse proxy TLS, network ACLs, secret management, optional SSO).
