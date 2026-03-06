@@ -1,68 +1,58 @@
 # MicroSocks Admin (Flask)
 
-## Simple Flask web admin for the MicroSocks SQLite DB
+Minimal web administration UI for the MicroSocks SQLite database.
 
-## Features
+## What it does
 
-- List accounts
-- Show account details (including recent connections)
-- Add account (password hashed with Argon2)
-- Update account (password and monthly_bandwidth)
-- Delete account (confirmation)
+- HTTP Basic auth gate for all non-static routes.
+- CSRF protection via Flask-WTF.
+- List accounts and show per-user usage/accounting fields.
+- Show recent connection records for a selected user.
+- Add/update/delete users.
+- Update per-user monthly bandwidth and whitelist.
+- JSON responses for list/detail/stat routes when requested.
 
-## Requirements
+## Important behavior
 
-- Python 3.8+
-- Install dependencies:
-
-```bash
-    pip install -r requirements.txt
-```
+- DB path is controlled by `DATABASE` env var (default `../microsocks.db` relative to admin folder).
+- Schema bootstrap is automatic at startup (`init_db()` uses the same `accounts` + `connections` layout as server code).
+- Passwords created/updated by this UI are Argon2-hashed (`argon2-cffi`).
 
 ## Run
 
-- By default the app expects the DB at ../microsocks.db relative to the admin folder. You can override with the DATABASE env var:
-
 ```bash
-    export DATABASE=/path/to/microsocks.db
-    python app.py
-```
-
-- Visit <http://127.0.0.1:5000/> to use the UI. The app also supports JSON responses when the client prefers JSON (Accept header).
-
-Notes
-
-- This is a minimal admin UI intended for local or internal use only; add authentication and CSRF protection before exposing publicly.
-- It creates the DB schema if the database file is missing.
-
-Virtualenv / development environment
-
-- Create and activate a virtualenv (recommended):
-
-```bash
+cd microsocks-app/admin
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-- Install dependencies:
-
-```bash
 pip install -r requirements.txt
-```
 
-- Export optional configuration (example):
-
-```bash
-export DATABASE=/path/to/microsocks.db
+export DATABASE=/absolute/path/to/microsocks.db
 export ADMIN_USER=admin
-export ADMIN_PASS=secret
-export SECRET_KEY="a-strong-secret-for-csrf-and-sessions"
-```
+export ADMIN_PASS='replace-me'
+export SECRET_KEY='replace-me-with-random-value'
 
-- Run the app:
-
-```bash
 python app.py
 ```
 
-Security note: The app now includes HTTP Basic authentication and CSRF protection, but it is still minimal and intended for internal use. Use a strong SECRET_KEY and secure the admin endpoint behind a firewall or reverse proxy (with TLS) in production.
+Then open <http://127.0.0.1:5000/>.
+
+## Security notes
+
+This app is intentionally small and should be treated as an internal admin tool.
+
+For production use, at minimum:
+
+1. Run behind TLS (reverse proxy).
+2. Restrict network access (VPN/private subnet/IP allowlist).
+3. Set strong `ADMIN_USER`/`ADMIN_PASS` and a strong random `SECRET_KEY`.
+4. Do **not** run Flask debug mode in production.
+5. Add centralized auth (SSO/OIDC) and audit logging if this becomes multi-operator.
+
+## Current gaps
+
+- No RBAC/multi-admin support.
+- No account lockout or login throttling.
+- No built-in retention management for large `connections` tables.
+- Uses HTTP Basic auth only (no MFA/session policy).
+
+See repository root `README.md` for system-wide deployment TODO/fix items.
