@@ -56,7 +56,19 @@ static const char *schema_sql =
     "ON connections(account_id, ts_timestamp);"
 
     "CREATE INDEX IF NOT EXISTS idx_connections_ts "
-    "ON connections(ts_timestamp);";
+    "ON connections(ts_timestamp);"
+
+    "CREATE TABLE IF NOT EXISTS account_whitelist ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  account_id INTEGER NOT NULL,"
+    "  ip_cidr TEXT NOT NULL,"
+    "  ts_created INTEGER NOT NULL,"
+    "  UNIQUE(account_id, ip_cidr),"
+    "  FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE"
+    ");"
+
+    "CREATE INDEX IF NOT EXISTS idx_account_whitelist_account "
+    "ON account_whitelist(account_id);";
 
 int db_init(const char *dbpath) {
     int rc;
@@ -254,23 +266,49 @@ static int check_ip_in_whitelist(const char *whitelist, const char *ip) {
     return found;
 }
 
+static int account_has_normalized_whitelist_rows(int account_id) {
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT COUNT(*) FROM account_whitelist WHERE account_id = ?";
+    int has_rows = 0;
+    if (!db) return 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int(stmt, 1, account_id);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        has_rows = sqlite3_column_int(stmt, 0) > 0;
+    }
+    sqlite3_finalize(stmt);
+    return has_rows;
+}
+
 int db_account_check_whitelist(int account_id, union sockaddr_union *addr) {
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT whitelist FROM accounts WHERE id = ?";
-    int allowed = 0;
+    const char *sql_norm = "SELECT 1 FROM account_whitelist WHERE account_id = ? AND ip_cidr = ? LIMIT 1";
+    const char *sql_legacy = "SELECT whitelist FROM accounts WHERE id = ?";
+    int allowed = 1;
     if (!db) return 0;
 
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    char ip[INET6_ADDRSTRLEN];
+    void *addr_ptr = SOCKADDR_UNION_ADDRESS(addr);
+    inet_ntop(SOCKADDR_UNION_AF(addr), addr_ptr, ip, sizeof(ip));
+
+    if (account_has_normalized_whitelist_rows(account_id)) {
+        int rc = sqlite3_prepare_v2(db, sql_norm, -1, &stmt, NULL);
+        if (rc != SQLITE_OK) return 0;
+        sqlite3_bind_int(stmt, 1, account_id);
+        sqlite3_bind_text(stmt, 2, ip, -1, SQLITE_TRANSIENT);
+        allowed = (sqlite3_step(stmt) == SQLITE_ROW);
+        sqlite3_finalize(stmt);
+        return allowed;
+    }
+
+    int rc = sqlite3_prepare_v2(db, sql_legacy, -1, &stmt, NULL);
     if (rc != SQLITE_OK) return 0;
 
     sqlite3_bind_int(stmt, 1, account_id);
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const unsigned char *whitelist = sqlite3_column_text(stmt, 0);
-        if (whitelist) {
-            char ip[INET6_ADDRSTRLEN];
-            void *addr_ptr = SOCKADDR_UNION_ADDRESS(addr);
-            inet_ntop(SOCKADDR_UNION_AF(addr), addr_ptr, ip, sizeof(ip));
+        if (whitelist && *whitelist) {
             allowed = check_ip_in_whitelist((const char*)whitelist, ip);
         }
     }
@@ -314,17 +352,57 @@ int db_account_update_last_ip(int account_id, const char *client_ip) {
 
 int db_account_add_whitelist(int account_id, const char *ip) {
     sqlite3_stmt *stmt = NULL;
+    const char *sql_norm = "INSERT OR IGNORE INTO account_whitelist (account_id, ip_cidr, ts_created) VALUES (?, ?, ?)";
     const char *sql = "UPDATE accounts SET whitelist = CASE "
                       "WHEN whitelist IS NULL OR whitelist = '' THEN ? "
                       "ELSE whitelist || ',' || ? END "
                       "WHERE id = ?";
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db, sql_norm, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3_bind_int(stmt, 1, account_id);
+    sqlite3_bind_text(stmt, 2, ip, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)time(NULL));
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return rc;
+
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) return rc;
 
     sqlite3_bind_text(stmt, 1, ip, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, ip, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 3, account_id);
 
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}
+
+int db_account_get_online(int account_id) {
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT online FROM accounts WHERE id = ? LIMIT 1";
+    int online = -1;
+    if (!db) return -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, account_id);
+    if (sqlite3_step(stmt) == SQLITE_ROW) online = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return online;
+}
+
+int db_prune_connections_older_than_days(int keep_days) {
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "DELETE FROM connections WHERE ts_timestamp < ?";
+    sqlite3_int64 cutoff;
+    int rc;
+
+    if (keep_days <= 0) return SQLITE_ERROR;
+    cutoff = (sqlite3_int64)time(NULL) - (sqlite3_int64)keep_days * 86400;
+
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+    sqlite3_bind_int64(stmt, 1, cutoff);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
