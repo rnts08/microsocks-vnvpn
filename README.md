@@ -1,128 +1,145 @@
-MicroSocks - multithreaded, small, efficient SOCKS5 server
-===========================================================
+MicroSocks VPN Variant (SOCKS5 + SQLite Accounts)
+=================================================
 
-a SOCKS5 service that you can run on your remote boxes to tunnel connections
-through them, if for some reason SSH doesn't cut it for you.
+This repository contains a SOCKS5 proxy server (`microsocks`) extended with:
 
-It's very lightweight, and very light on resources too:
+- Per-user authentication backed by SQLite.
+- Per-user usage/accounting counters.
+- Connection logging to a `connections` table.
+- CLI and web admin tools for account management.
 
-for every client, a thread with a low stack size is spawned.
-the main process basically doesn't consume any resources at all.
-
-the only limits are the amount of file descriptors and the RAM.
-
-It's also designed to be robust: it handles resource exhaustion
-gracefully by simply denying new connections, instead of calling abort()
-as most other programs do these days.
-
-another plus is ease-of-use: no config file necessary, everything can be
-done from the command line and doesn't even need any parameters for quick
-setup.
-
-History
--------
-
-This is the successor of "rocksocks5", and it was written with
-different goals in mind:
-
-- prefer usage of standard libc functions over homegrown ones
-- no artificial limits
-- do not aim for minimal binary size, but for minimal source code size,
-  and maximal readability, reusability, and extensibility.
-
-as a result of that, ipv4, dns, and ipv6 is supported out of the box
-and can use the same code, while rocksocks5 has several compile time
-defines to bring down the size of the resulting binary to extreme values
-like 10 KB static linked when only ipv4 support is enabled.
-
-still, if optimized for size, *this* program when static linked against musl
-libc is not even 50 KB. that's easily usable even on the cheapest routers.
-
-command line options
---------------------
-
-    microsocks -q -i listenip -p port -b bindaddr -w wl -d dbpath
-
-All arguments are optional. By default `listenip` is `0.0.0.0` and port `1080`.
-
-- option `-q` disables logging.
-- option `-b` specifies which IP outgoing connections are bound to.
-- option `-w` allows specifying a comma-separated whitelist of IP addresses that may use the proxy without database authentication.
-  e.g. `-w 127.0.0.1,192.168.1.100,::1` or just `-w 10.0.0.1`.
-  To allow access ONLY to those IPs, choose an impossible-to-guess password for any DB accounts (or don't create accounts at all).
-
-Authentication note (DB-based)
-------------------------------
-
-This build requires authentication against the bundled SQLite database. The server no longer accepts static `-u`/`-P` CLI credentials; instead, create accounts in the database or add client IPs to the whitelist with `-w`.
-
-To create an initial database and add a user (plaintext passwords are accepted and will be re-hashed on first login):
-
-    # Preferred: use the bundled admin tool to create accounts (creates DB/schema if missing)
-    ./msadmin add alice secret123
-
-    # Alternatively, the server will create the DB/schema automatically when started.
-    # Start the server once to create the DB, then add an account with msadmin or sqlite3.
-
-    # Example using sqlite3 to insert a plaintext account (msadmin is preferred):
-    sqlite3 microsocks.db "INSERT INTO accounts (username, password, ts_created, ts_updated, ts_seen) VALUES ('alice', 'secret123', strftime('%s','now'), strftime('%s','now'), strftime('%s','now'));"
-
-Before making schema changes or running migrations, back up your DB:
-
-    cp microsocks.db microsocks.db.bak
-
-After creating the account you can test authentication via curl (example):
-
-    curl --socks5 alice:secret123@127.0.0.1:1080 https://example.com
-
-Migration and password hashing
-------------------------------
-
-If you need to migrate plaintext passwords to Argon2id (libsodium), use the `msadmin` tool and the provided `scripts/migrate-run.sh` wrapper. That script will create a timestamped backup before running the migration. See `MIGRATION.md` for details.
-
-Supported SOCKS5 Features
--------------------------
-
-- authentication: none, password, one-time
-- IPv4, IPv6, DNS
-- TCP (no UDP at this time)
-
-Troubleshooting
+Core Components
 ---------------
 
-if you experience segfaults, try raising the `THREAD_STACK_SIZE` in sockssrv.c
-for your platform in steps of 4KB.
+- `microsocks` (C server): accepts SOCKS5 TCP CONNECT traffic and authenticates users against SQLite.
+- `msadmin` (C CLI): creates, updates, lists, deletes users, and runs password migration/rehash checks.
+- `microsocks-app/admin` (Flask app): basic web UI for managing users and viewing recent connection history.
 
-if this fixes your issue please file a pull request.
+Implemented Functionality
+-------------------------
 
-microsocks uses the smallest safe thread stack size to minimize overall memory
-usage.
+### SOCKS5 server behavior
 
-Build note
-----------
+- SOCKS5 CONNECT support for IPv4, IPv6, and DNS name targets.
+- Username/password authentication (RFC 1929 style) using DB accounts.
+- Per-account `enabled` flag check (disabled accounts cannot authenticate).
+- Optional per-account source-IP whitelist (`accounts.whitelist` CSV).
+- Connection accounting into:
+  - Monthly counters (`m_bytes_sent`, `m_bytes_received`)
+  - Lifetime counters (`total_bytes_sent`, `total_bytes_received`)
+- Connection logs persisted in `connections` with destination, status, and byte counts.
 
-The project previously contained nonstandard `#pragma RcB2` directives in some
-headers which produced warnings on modern compilers ("ignoring '#pragma RcB2'").
-Those pragmas were project-specific build hints and are not supported by
-standard compilers, so they were removed from `server.h` and `sblist.h` to
-keep builds warning-free. If you rely on a custom build tool that used those
-directives, restore them or adjust your toolchain accordingly.
+### Data model (SQLite)
 
-Installation and configuration directory
-----------------------------------------
+Server/admin schema includes:
 
-This packaging builds and installs an example configuration at `/etc/microsocks/microsocks.conf`.
-Make sure the directory exists and is writable by the installer (root) when running `make install`.
+- `accounts`:
+  - identity: `id`, `username`, `password`
+  - access: `enabled`, `whitelist`, `last_client_ip`
+  - timestamps: `ts_created`, `ts_updated`, `ts_seen`
+  - quotas/accounting: `monthly_bandwidth`, monthly + lifetime byte counters, `online`
+- `connections`:
+  - `account_id`, `client_ip`, `destination`, `status`
+  - `bytes_sent`, `bytes_received`, `ts_timestamp`
 
-Typical steps (as root):
+### Password handling
 
-    mkdir -p /etc/microsocks
-    cp microsocks.conf /etc/microsocks/microsocks.conf
-    chown root:root /etc/microsocks/microsocks.conf
-    chmod 644 /etc/microsocks/microsocks.conf
+- New passwords are hashed with Argon2id via libsodium (`crypto_pwhash_str`) in C tools.
+- Existing plaintext passwords are transparently re-hashed on successful login.
+- Migration helper script is available at `scripts/migrate-run.sh` (see `MIGRATION.md`).
 
-If you install via `make install`, the `install.sh` helper is invoked with
-the `-D` option and will create the target directory for you. The server
-process itself must be able to write to the logfile path you configure in the
-config (or the directory containing the logfile) — ensure the runtime user has
-the necessary permissions.
+### Configuration
+
+`microsocks` supports:
+
+- config file (default `/etc/microsocks/microsocks.conf`)
+- CLI overrides for listen address/port, database path, bind address, logfile, and quiet mode
+- `--print-config` to print effective values and exit
+
+Quick Start
+-----------
+
+Build:
+
+```bash
+make
+```
+
+Create first user (DB is auto-created if needed):
+
+```bash
+./msadmin add alice 'strong-password' 0
+```
+
+Run server:
+
+```bash
+./microsocks -i 0.0.0.0 -p 1080 -d ./microsocks.db
+```
+
+Test with curl:
+
+```bash
+curl --socks5 alice:strong-password@127.0.0.1:1080 https://example.com
+```
+
+Run web admin (optional):
+
+```bash
+cd microsocks-app/admin
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export DATABASE=/absolute/path/to/microsocks.db
+export ADMIN_USER=admin
+export ADMIN_PASS='replace-me'
+export SECRET_KEY='replace-me-with-random-value'
+python app.py
+```
+
+Deployment Readiness: TODO List
+-------------------------------
+
+The project is functional, but the following work should be done before production deployment:
+
+1. Add proper service hardening docs and examples (systemd sandboxing, dedicated user/group, `ProtectSystem`, `NoNewPrivileges`, `PrivateTmp`).
+2. Provide a documented backup/restore strategy for SQLite (hot backups, retention, restore drill).
+3. Add database maintenance guidance (`VACUUM`, WAL checkpoint policy, log retention/rotation for `connections`).
+4. Add observability endpoints or metrics export (Prometheus/textfile) for auth failures, active sessions, bytes/sec, and DB latency.
+5. Add integration tests for end-to-end SOCKS5 auth + accounting under concurrent load.
+6. Add load/performance sizing guide (expected users/throughput vs CPU, memory, and disk I/O).
+7. Add release/versioned upgrade playbook (schema migrations, rollback steps).
+8. Add a production security guide for the Flask admin (reverse proxy TLS, network ACLs, secret management, optional SSO).
+
+Known Fix List (Code-Level Gaps)
+--------------------------------
+
+1. **Monthly quota enforcement happens too early.**
+   The quota check in `clientthread()` runs before authentication sets `t->account_id`, so it is effectively skipped. Move quota enforcement to immediately after successful auth and before CONNECT relay.
+
+2. **`online` counter is never maintained.**
+   Schema and admin UI expose `online`, but server code does not increment/decrement it on connect/disconnect.
+
+3. **Monthly reset is not scheduled.**
+   `db_reset_monthly_stats()` exists but is not invoked by server runtime. Add scheduler/cron integration or periodic in-process reset.
+
+4. **No indexes on high-traffic query paths.**
+   Add indexes such as `connections(account_id, ts_timestamp)` and `connections(ts_timestamp)` for admin pages/stats scalability.
+
+5. **Whitelist format is a comma-separated text field.**
+   This is simple but brittle for management/auditing. Consider a normalized `account_whitelist` table with one row per IP/CIDR.
+
+6. **Server-side rate limiting / abuse protection is absent.**
+   Add controls for auth brute force, per-IP connection rate, and max concurrent sessions per account.
+
+7. **Flask admin defaults are unsafe for production if unchanged.**
+   It starts in debug mode and defaults to `admin/admin` + weak secret fallback. Force explicit secrets in production profile.
+
+8. **Connection-log retention policy is not implemented.**
+   `connections` can grow without bounds; add retention/archival and cleanup tooling.
+
+Notes
+-----
+
+- For password migration details, see `MIGRATION.md`.
+- For web admin details, see `microsocks-app/admin/README.md`.
