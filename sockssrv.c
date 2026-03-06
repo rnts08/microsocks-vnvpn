@@ -513,6 +513,22 @@ static int handshake(struct thread *t) {
 	return -1;
 }
 
+static int account_monthly_quota_exceeded(int account_id) {
+	sqlite3_stmt *stmt;
+	const char *sql = "SELECT monthly_bandwidth, m_bytes_sent + m_bytes_received "
+	                 "FROM accounts WHERE id = ?";
+	if(db_stmt_prepare(sql, &stmt) != SQLITE_OK) return 0;
+	sqlite3_bind_int(stmt, 1, account_id);
+	int exceeded = 0;
+	if(sqlite3_step(stmt) == SQLITE_ROW) {
+		int64_t limit = sqlite3_column_int64(stmt, 0);
+		int64_t used = sqlite3_column_int64(stmt, 1);
+		if(limit > 0 && used >= limit) exceeded = 1;
+	}
+	sqlite3_finalize(stmt);
+	return exceeded;
+}
+
 static void* clientthread(void *data) {
 	struct thread *t = data;
 	/* initialize accounting fields */
@@ -521,31 +537,23 @@ static void* clientthread(void *data) {
 	t->dest[0] = 0;
 
 	int remotefd = handshake(t);
+	int online_tracked = 0;
+	const char *connection_status = "failed";
 	if(remotefd != -1 && t->account_id >= 0) {
-		/* Account ID is only known after successful authentication. */
-		sqlite3_stmt *stmt;
-		const char *sql = "SELECT monthly_bandwidth, m_bytes_sent + m_bytes_received "
-		                 "FROM accounts WHERE id = ?";
-		if(db_stmt_prepare(sql, &stmt) == SQLITE_OK) {
-			sqlite3_bind_int(stmt, 1, t->account_id);
-			if(sqlite3_step(stmt) == SQLITE_ROW) {
-				int64_t limit = sqlite3_column_int64(stmt, 0);
-				int64_t used = sqlite3_column_int64(stmt, 1);
-				if(limit > 0 && used >= limit) {
-					if(CONFIG_LOG) {
-						char clientname[256];
-						int af = SOCKADDR_UNION_AF(&t->client.addr);
-						void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
-						inet_ntop(af, ipdata, clientname, sizeof clientname);
-						dolog("account: %s -> %s: status=bandwidth_limit_exceeded\n", clientname,
-							t->dest[0] ? t->dest : "-");
-					}
-					sqlite3_finalize(stmt);
-					close(remotefd);
-					remotefd = -1;
-				}
+		if(account_monthly_quota_exceeded(t->account_id)) {
+			if(CONFIG_LOG) {
+				char clientname[256];
+				int af = SOCKADDR_UNION_AF(&t->client.addr);
+				void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+				inet_ntop(af, ipdata, clientname, sizeof clientname);
+				dolog("account: %s -> %s: status=bandwidth_limit_exceeded\n", clientname,
+					t->dest[0] ? t->dest : "-");
 			}
-			if(remotefd != -1) sqlite3_finalize(stmt);
+			connection_status = "bandwidth_limit_exceeded";
+			close(remotefd);
+			remotefd = -1;
+		} else if(db_account_update_online(t->account_id, +1) == SQLITE_OK) {
+			online_tracked = 1;
 		}
 	}
 	if(remotefd != -1) {
@@ -562,6 +570,7 @@ static void* clientthread(void *data) {
 		/* Update bandwidth usage */
 		if(t->account_id >= 0)
 			db_account_update_bandwidth(t->account_id, t->bytes_client_to_remote, t->bytes_remote_to_client);
+		connection_status = "success";
 	} else {
 		if(CONFIG_LOG) {
 			char clientname[256];
@@ -579,13 +588,22 @@ static void* clientthread(void *data) {
 		void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
 		inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, clientname, sizeof clientname);
 		db_log_connection(t->account_id, clientname, t->dest[0] ? t->dest : "-",
-						 remotefd != -1 ? "success" : "failed",
+						 connection_status,
 						 t->bytes_client_to_remote, t->bytes_remote_to_client);
+		if(online_tracked)
+			db_account_update_online(t->account_id, -1);
 	}
 
 	close(t->client.fd);
 	t->done = 1;
 	return 0;
+}
+
+static int current_month_key(time_t now) {
+	struct tm t;
+	if(localtime_r(&now, &t) == NULL)
+		return -1;
+	return (t.tm_year + 1900) * 100 + (t.tm_mon + 1);
 }
 
 static void collect(sblist *threads) {
@@ -811,8 +829,20 @@ int main(int argc, char** argv) {
 	}
 	server = &s;
 
+	time_t now = time(NULL);
+	int last_reset_month = current_month_key(now);
+
 	while(1) {
 		collect(threads);
+		int month_key = current_month_key(time(NULL));
+		if(last_reset_month != -1 && month_key != -1 && month_key != last_reset_month) {
+			if(db_reset_monthly_stats() == SQLITE_OK) {
+				dolog("monthly bandwidth counters reset for month=%d\n", month_key);
+			} else {
+				dolog("failed to reset monthly bandwidth counters for month=%d\n", month_key);
+			}
+			last_reset_month = month_key;
+		}
 		struct client c;
 		struct thread *curr = malloc(sizeof (struct thread));
 		if(!curr) goto oom;

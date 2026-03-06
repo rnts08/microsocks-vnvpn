@@ -50,7 +50,13 @@ static const char *schema_sql =
     "  bytes_received INTEGER NOT NULL,"
     "  ts_timestamp INTEGER NOT NULL,"
     "  FOREIGN KEY(account_id) REFERENCES accounts(id)"
-    ");";
+    ");"
+
+    "CREATE INDEX IF NOT EXISTS idx_connections_account_ts "
+    "ON connections(account_id, ts_timestamp);"
+
+    "CREATE INDEX IF NOT EXISTS idx_connections_ts "
+    "ON connections(ts_timestamp);";
 
 int db_init(const char *dbpath) {
     int rc;
@@ -271,6 +277,25 @@ int db_account_check_whitelist(int account_id, union sockaddr_union *addr) {
 
     sqlite3_finalize(stmt);
     return allowed;
+}
+
+int db_account_update_online(int account_id, int delta) {
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "UPDATE accounts SET "
+                      "online = CASE WHEN online + ? < 0 THEN 0 ELSE online + ? END, "
+                      "ts_updated = ? "
+                      "WHERE id = ?";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    sqlite3_bind_int(stmt, 1, delta);
+    sqlite3_bind_int(stmt, 2, delta);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)time(NULL));
+    sqlite3_bind_int(stmt, 4, account_id);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
 }
 
 int db_account_update_last_ip(int account_id, const char *client_ip) {
