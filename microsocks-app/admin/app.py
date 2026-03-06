@@ -20,6 +20,34 @@ ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
 ADMIN_PASS = os.environ.get('ADMIN_PASS', 'admin')
 
 
+def _is_truthy(value: str) -> bool:
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def validate_security_config():
+    """Fail fast on insecure production-like defaults."""
+    if _is_truthy(os.environ.get('ALLOW_INSECURE_DEFAULTS', '0')):
+        return
+
+    errors = []
+    if ADMIN_USER == 'admin' and ADMIN_PASS == 'admin':
+        errors.append('Set non-default ADMIN_USER/ADMIN_PASS; refusing to run with admin/admin.')
+
+    if ADMIN_PASS.strip() == '':
+        errors.append('ADMIN_PASS cannot be empty.')
+
+    secret_key = app.secret_key or ''
+    if secret_key in ('dev-secret', 'replace-me-with-random-value', ''):
+        errors.append('Set a strong random SECRET_KEY; refusing to run with insecure default.')
+
+    if errors:
+        joined = ' '.join(errors)
+        raise RuntimeError(
+            f'Unsafe admin configuration. {joined} '
+            'For local-only development, set ALLOW_INSECURE_DEFAULTS=1 to bypass this check.'
+        )
+
+
 def _check_basic_auth():
     auth = request.authorization
     if not auth:
@@ -378,7 +406,11 @@ def connections_stats():
     return jsonify(data)
 
 if __name__ == '__main__':
+    validate_security_config()
+
     # ensure DB exists and schema is applied
     with app.app_context():
         init_db()
-    app.run(host='127.0.0.1', port=5000, debug=True)
+
+    debug_mode = _is_truthy(os.environ.get('FLASK_DEBUG', '0'))
+    app.run(host='127.0.0.1', port=5000, debug=debug_mode)

@@ -15,5 +15,5 @@
 
 - [ ] Replace/augment CSV whitelist storage with normalized per-account whitelist table.
 - [ ] Add anti-abuse controls: auth rate limiting, per-IP and per-account connection caps.
-- [ ] Enforce secure admin defaults (disable debug in prod, require non-default credentials/secrets).
+- [x] Enforce secure admin defaults (debug disabled by default; require non-default credentials/secrets unless `ALLOW_INSECURE_DEFAULTS=1`).
 - [ ] Add pruning/archival utility for `connections` table to prevent unbounded growth.
