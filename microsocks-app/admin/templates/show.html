@@ -4,8 +4,10 @@
     <h2 class="mb-0">Account: {{ row.username }}</h2>
     <div>
       <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Back to list</a>
-      <a href="{{ url_for('update_user', username=row.username) }}" class="btn btn-outline-primary btn-sm">Edit</a>
-      <a href="{{ url_for('delete_user', username=row.username) }}" class="btn btn-outline-danger btn-sm">Delete</a>
+      {% if is_admin %}
+        <a href="{{ url_for('update_user', username=row.username) }}" class="btn btn-outline-primary btn-sm">Edit</a>
+        <a href="{{ url_for('delete_user', username=row.username) }}" class="btn btn-outline-danger btn-sm">Delete</a>
+      {% endif %}
     </div>
   </div>
 
@@ -105,8 +107,10 @@
 
   <div class="text-end">
     <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Back to list</a>
-    <a href="{{ url_for('update_user', username=row.username) }}" class="btn btn-outline-primary">Edit</a>
-    <a href="{{ url_for('delete_user', username=row.username) }}" class="btn btn-outline-danger">Delete</a>
+    {% if is_admin %}
+      <a href="{{ url_for('update_user', username=row.username) }}" class="btn btn-outline-primary">Edit</a>
+      <a href="{{ url_for('delete_user', username=row.username) }}" class="btn btn-outline-danger">Delete</a>
+    {% endif %}
   </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>

@@ -32,8 +32,10 @@
             <td>{{ r.last_ip or 'unknown' }}</td>
             <td>
               <a href="{{ url_for('show_user', username=r.username) }}" class="btn btn-sm btn-outline-primary">Show</a>
-              <a href="{{ url_for('update_user', username=r.username) }}" class="btn btn-sm btn-outline-secondary">Edit</a>
-              <a href="{{ url_for('delete_user', username=r.username) }}" class="btn btn-sm btn-outline-danger">Delete</a>
+              {% if is_admin %}
+                <a href="{{ url_for('update_user', username=r.username) }}" class="btn btn-sm btn-outline-secondary">Edit</a>
+                <a href="{{ url_for('delete_user', username=r.username) }}" class="btn btn-sm btn-outline-danger">Delete</a>
+              {% endif %}
             </td>
           </tr>
         {% endfor %}
