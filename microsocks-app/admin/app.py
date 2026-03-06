@@ -13,6 +13,7 @@ import sqlite3
 import os
 import time
 import hmac
+import json
 from functools import wraps
 from argon2 import PasswordHasher, exceptions as argon2_exceptions
 from flask_wtf import CSRFProtect
@@ -35,6 +36,52 @@ LOCKOUT_DURATION_SECONDS = int(os.environ.get('ADMIN_LOCKOUT_DURATION_SECONDS', 
 CONNECTION_RETENTION_DAYS = int(os.environ.get('CONNECTION_RETENTION_DAYS', '0'))
 RETENTION_CHECK_INTERVAL_SECONDS = 3600
 _last_retention_run = 0
+
+DEFAULT_PUBLIC_PACKAGES = [
+    {
+        'id': 'monthly-1gb',
+        'name': '1 Month · 1GB/Day',
+        'details': 'Daily capped access for one month',
+        'price_usd': 10,
+        'icon': 'fa-calendar-days',
+    },
+    {
+        'id': 'paygo-10gb',
+        'name': 'Pay-as-you-go · 10GB',
+        'details': 'Top up data in 10GB blocks',
+        'price_usd': 5,
+        'icon': 'fa-chart-simple',
+    },
+    {
+        'id': 'unlimited',
+        'name': 'Unlimited Data',
+        'details': 'No data cap for heavy usage',
+        'price_usd': 500,
+        'icon': 'fa-infinity',
+    },
+]
+
+DEFAULT_PUBLIC_CURRENCIES = ['btc']
+DEFAULT_PUBLIC_CONVERSION_RATES = {'btc': 65000}
+DEFAULT_PUBLIC_PAYMENT_ADDRESSES = {'btc': 'bc1qexamplechangeinadmin'}
+
+
+def _load_json_env(var_name: str, default):
+    raw = os.environ.get(var_name, '').strip()
+    if not raw:
+        return default
+    try:
+        parsed = json.loads(raw)
+        return parsed
+    except Exception:
+        return default
+
+
+PUBLIC_FRONTEND_ALLOWED_ORIGINS = os.environ.get('PUBLIC_FRONTEND_ALLOWED_ORIGINS', '*')
+PUBLIC_PACKAGES = _load_json_env('PUBLIC_PACKAGES_JSON', DEFAULT_PUBLIC_PACKAGES)
+PUBLIC_CURRENCIES = _load_json_env('PUBLIC_CURRENCIES_JSON', DEFAULT_PUBLIC_CURRENCIES)
+PUBLIC_CONVERSION_RATES = _load_json_env('PUBLIC_CONVERSION_RATES_JSON', DEFAULT_PUBLIC_CONVERSION_RATES)
+PUBLIC_PAYMENT_ADDRESSES = _load_json_env('PUBLIC_PAYMENT_ADDRESSES_JSON', DEFAULT_PUBLIC_PAYMENT_ADDRESSES)
 
 
 def _is_truthy(value: str) -> bool:
@@ -565,6 +612,30 @@ def connections_stats():
 
     return jsonify(data)
 
+
+
+
+@app.after_request
+def add_public_api_cors_headers(response):
+    if request.path.startswith('/api/public/'):
+        response.headers['Access-Control-Allow-Origin'] = PUBLIC_FRONTEND_ALLOWED_ORIGINS
+        response.headers['Vary'] = 'Origin'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+
+@app.route('/api/public/catalog', methods=['GET', 'OPTIONS'])
+def public_catalog():
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+    return jsonify({
+        'packages': PUBLIC_PACKAGES,
+        'currencies': PUBLIC_CURRENCIES,
+        'conversion_rates': PUBLIC_CONVERSION_RATES,
+        'payment_addresses': PUBLIC_PAYMENT_ADDRESSES,
+    })
 
 @app.route('/maintenance/retention', methods=['POST'])
 @require_login(role='admin')
