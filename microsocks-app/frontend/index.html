@@ -158,15 +158,22 @@
   </main>
 
   <script>
-    const packages = [
-      { id: 'monthly-1gb', name: '1 Month · 1GB/Day', details: 'Daily capped access for one month', priceUSD: 10, icon: 'fa-calendar-days' },
-      { id: 'paygo-10gb', name: 'Pay-as-you-go · 10GB', details: 'Top up data in 10GB blocks', priceUSD: 5, icon: 'fa-chart-simple' },
-      { id: 'unlimited', name: 'Unlimited Data', details: 'No data cap for heavy usage', priceUSD: 500, icon: 'fa-infinity' }
-    ];
+    const ADMIN_API_BASE = window.ADMIN_API_BASE || 'http://127.0.0.1:5000';
 
-    const btcUsdRate = 65000;
-    const prefixes = { btc: 'bc1q' };
-    let selectedPackage = packages[0];
+    const defaultCatalog = {
+      packages: [
+        { id: 'monthly-1gb', name: '1 Month · 1GB/Day', details: 'Daily capped access for one month', price_usd: 10, icon: 'fa-calendar-days' },
+        { id: 'paygo-10gb', name: 'Pay-as-you-go · 10GB', details: 'Top up data in 10GB blocks', price_usd: 5, icon: 'fa-chart-simple' },
+        { id: 'unlimited', name: 'Unlimited Data', details: 'No data cap for heavy usage', price_usd: 500, icon: 'fa-infinity' }
+      ],
+      currencies: ['btc'],
+      conversion_rates: { btc: 65000 },
+      payment_addresses: { btc: 'bc1qexamplechangeinadmin' }
+    };
+
+    let catalog = { ...defaultCatalog };
+    let selectedPackage = catalog.packages[0];
+    let selectedCurrency = catalog.currencies[0] || 'btc';
 
     const packageList = document.getElementById('packageList');
     const emailInput = document.getElementById('emailInput');
@@ -184,17 +191,18 @@
 
     function renderPackages() {
       packageList.innerHTML = '';
-      packages.forEach((pkg) => {
+      catalog.packages.forEach((pkg) => {
         const card = document.createElement('div');
         card.className = 'col-md-4';
+        const priceUSD = Number(pkg.price_usd || 0);
         card.innerHTML = `
           <article class="package-card glass h-100 p-3 ${pkg.id === selectedPackage.id ? 'active' : ''}" data-package="${pkg.id}">
             <div class="d-flex align-items-center justify-content-between mb-2">
               <h2 class="h5 mb-0">${pkg.name}</h2>
-              <i class="fa-solid ${pkg.icon} text-info"></i>
+              <i class="fa-solid ${pkg.icon || 'fa-box'} text-info"></i>
             </div>
-            <p class="small mb-2"><span class="badge badge-speed rounded-pill">${pkg.details}</span></p>
-            <p class="h4 mb-0">$${pkg.priceUSD.toFixed(2)}</p>
+            <p class="small mb-2"><span class="badge badge-speed rounded-pill">${pkg.details || ''}</span></p>
+            <p class="h4 mb-0">$${priceUSD.toFixed(2)}</p>
           </article>
         `;
         card.addEventListener('click', () => {
@@ -206,34 +214,64 @@
       });
     }
 
-    function mockAddress(currency) {
-      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789';
-      let body = '';
-      for (let i = 0; i < 28; i += 1) {
-        body += alphabet[Math.floor(Math.random() * alphabet.length)];
+    function getConvertedAmount(usd, currency) {
+      const rates = catalog.conversion_rates || {};
+      const rate = Number(rates[currency]);
+      if (!rate) {
+        throw new Error(`Missing conversion rate for currency: ${currency}`);
       }
-      return `${prefixes[currency]}${body}`;
+      return (usd / rate).toFixed(6);
     }
 
-    function getBtcAmount(usd) {
-      return (usd / btcUsdRate).toFixed(6);
-    }
-
-    async function mockCreateOrder(packageId, email, senderAddress) {
-      const pkg = packages.find((p) => p.id === packageId);
-      const amount = getBtcAmount(pkg.priceUSD);
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          resolve({
-            orderId: `ORD-${Date.now()}`,
-            email,
-            senderAddress,
-            currency: 'btc',
-            amount,
-            address: mockAddress('btc')
-          });
-        }, 500);
+    async function loadCatalog() {
+      const response = await fetch(`${ADMIN_API_BASE}/api/public/catalog`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' }
       });
+      if (!response.ok) {
+        throw new Error(`Catalog API failed with status ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const packages = Array.isArray(payload.packages) && payload.packages.length
+        ? payload.packages
+        : defaultCatalog.packages;
+      const currencies = Array.isArray(payload.currencies) && payload.currencies.length
+        ? payload.currencies
+        : defaultCatalog.currencies;
+
+      catalog = {
+        packages,
+        currencies,
+        conversion_rates: payload.conversion_rates || defaultCatalog.conversion_rates,
+        payment_addresses: payload.payment_addresses || defaultCatalog.payment_addresses
+      };
+
+      selectedPackage = catalog.packages[0];
+      selectedCurrency = catalog.currencies[0];
+      renderPackages();
+    }
+
+    async function createOrder(packageId, email, senderAddress) {
+      const pkg = catalog.packages.find((p) => p.id === packageId);
+      if (!pkg) {
+        throw new Error('Selected package is no longer available');
+      }
+
+      const amount = getConvertedAmount(Number(pkg.price_usd || 0), selectedCurrency);
+      const address = (catalog.payment_addresses || {})[selectedCurrency];
+      if (!address) {
+        throw new Error(`Missing payment address for currency: ${selectedCurrency.toUpperCase()}`);
+      }
+
+      return {
+        orderId: `ORD-${Date.now()}`,
+        email,
+        senderAddress,
+        currency: selectedCurrency,
+        amount,
+        address
+      };
     }
 
     generateBtn.addEventListener('click', async () => {
@@ -249,16 +287,19 @@
       generateBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Generating...';
       doneBlock.style.display = 'none';
 
-      const order = await mockCreateOrder(selectedPackage.id, email, senderAddress);
-
-      payCurrency.innerHTML = `<span class="crypto-icon"><i class="fa-brands fa-bitcoin"></i></span>${order.currency.toUpperCase()} · ${selectedPackage.name}`;
-      payAmount.textContent = `${order.amount} ${order.currency.toUpperCase()}`;
-      orderMeta.textContent = `Username/email: ${order.email} · Sender wallet: ${order.senderAddress}`;
-      payAddress.textContent = order.address;
-      paymentBlock.style.display = 'block';
-
-      generateBtn.disabled = false;
-      generateBtn.innerHTML = '<i class="fa-solid fa-wallet me-2"></i>Get Payment Address';
+      try {
+        const order = await createOrder(selectedPackage.id, email, senderAddress);
+        payCurrency.innerHTML = `<span class="crypto-icon"><i class="fa-brands fa-bitcoin"></i></span>${order.currency.toUpperCase()} · ${selectedPackage.name}`;
+        payAmount.textContent = `${order.amount} ${order.currency.toUpperCase()}`;
+        orderMeta.textContent = `Username/email: ${order.email} · Sender wallet: ${order.senderAddress}`;
+        payAddress.textContent = order.address;
+        paymentBlock.style.display = 'block';
+      } catch (err) {
+        alert(err.message || 'Failed to generate payment details.');
+      } finally {
+        generateBtn.disabled = false;
+        generateBtn.innerHTML = '<i class="fa-solid fa-wallet me-2"></i>Get Payment Address';
+      }
     });
 
     copyBtn.addEventListener('click', async () => {
@@ -279,7 +320,15 @@
       doneBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
 
-    renderPackages();
+    loadCatalog().catch((err) => {
+      console.error(err);
+      alert('Failed to load live package and pricing data from admin API. Showing fallback values.');
+      catalog = { ...defaultCatalog };
+      selectedPackage = catalog.packages[0];
+      selectedCurrency = catalog.currencies[0] || 'btc';
+      renderPackages();
+    });
   </script>
+
 </body>
 </html>

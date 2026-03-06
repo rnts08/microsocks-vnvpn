@@ -11,7 +11,11 @@ Minimal web administration UI for the MicroSocks SQLite database.
 - Add/update/delete users.
 - Update per-user monthly bandwidth and whitelist.
 - JSON responses for list/detail/stat routes when requested.
+<<<<<<< codex/update-frontend-for-dynamic-api-data
+- Public JSON catalog endpoint (`/api/public/catalog`) for static sales frontend package/currency data.
+=======
 - Includes sales modules backed by SQLite tables for `packages`, `orders`, and `transactions` with a sales dashboard.
+>>>>>>> master
 
 ## Important behavior
 
@@ -40,6 +44,12 @@ export SECRET_KEY='replace-me-with-random-value'
 # export ADMIN_LOCKOUT_DURATION_SECONDS=900
 # optional connection-log retention (0 disables retention):
 # export CONNECTION_RETENTION_DAYS=90
+# optional public catalog for static sales page:
+# export PUBLIC_PACKAGES_JSON='[{"id":"monthly-1gb","name":"1 Month · 1GB/Day","details":"Daily capped access for one month","price_usd":10,"icon":"fa-calendar-days"}]'
+# export PUBLIC_CURRENCIES_JSON='["btc"]'
+# export PUBLIC_CONVERSION_RATES_JSON='{"btc":65000}'
+# export PUBLIC_PAYMENT_ADDRESSES_JSON='{"btc":"bc1q..."}'
+# export PUBLIC_FRONTEND_ALLOWED_ORIGINS='*'
 # optional debug mode (default is off):
 # export FLASK_DEBUG=1
 
