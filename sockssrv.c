@@ -520,32 +520,34 @@ static void* clientthread(void *data) {
 	t->bytes_remote_to_client = 0;
 	t->dest[0] = 0;
 
-	/* Check account bandwidth limits */
-	sqlite3_stmt *stmt;
-	const char *sql = "SELECT monthly_bandwidth, m_bytes_sent + m_bytes_received "
-	                 "FROM accounts WHERE id = ?";
-	if (t->account_id >= 0 && db_stmt_prepare(sql, &stmt) == SQLITE_OK) {
-		sqlite3_bind_int(stmt, 1, t->account_id);
-		if (sqlite3_step(stmt) == SQLITE_ROW) {
-			int64_t limit = sqlite3_column_int64(stmt, 0);
-			int64_t used = sqlite3_column_int64(stmt, 1);
-			sqlite3_finalize(stmt);
-			if (limit > 0 && used >= limit) {
-				if(CONFIG_LOG) {
-					char clientname[256];
-					int af = SOCKADDR_UNION_AF(&t->client.addr);
-					void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
-					inet_ntop(af, ipdata, clientname, sizeof clientname);
-					dolog("account: %s -> %s: status=bandwidth_limit_exceeded\n", clientname, "-");
+	int remotefd = handshake(t);
+	if(remotefd != -1 && t->account_id >= 0) {
+		/* Account ID is only known after successful authentication. */
+		sqlite3_stmt *stmt;
+		const char *sql = "SELECT monthly_bandwidth, m_bytes_sent + m_bytes_received "
+		                 "FROM accounts WHERE id = ?";
+		if(db_stmt_prepare(sql, &stmt) == SQLITE_OK) {
+			sqlite3_bind_int(stmt, 1, t->account_id);
+			if(sqlite3_step(stmt) == SQLITE_ROW) {
+				int64_t limit = sqlite3_column_int64(stmt, 0);
+				int64_t used = sqlite3_column_int64(stmt, 1);
+				if(limit > 0 && used >= limit) {
+					if(CONFIG_LOG) {
+						char clientname[256];
+						int af = SOCKADDR_UNION_AF(&t->client.addr);
+						void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+						inet_ntop(af, ipdata, clientname, sizeof clientname);
+						dolog("account: %s -> %s: status=bandwidth_limit_exceeded\n", clientname,
+							t->dest[0] ? t->dest : "-");
+					}
+					sqlite3_finalize(stmt);
+					close(remotefd);
+					remotefd = -1;
 				}
-				close(t->client.fd);
-				t->done = 1;
-				return NULL;
 			}
+			if(remotefd != -1) sqlite3_finalize(stmt);
 		}
 	}
-
-	int remotefd = handshake(t);
 	if(remotefd != -1) {
 		copyloop(t->client.fd, remotefd, &t->bytes_client_to_remote, &t->bytes_remote_to_client);
 		close(remotefd);
