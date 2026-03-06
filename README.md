@@ -120,8 +120,8 @@ Known Fix List (Code-Level Gaps)
 2. **Server-side rate limiting / abuse protection is absent.**
    Add controls for auth brute force, per-IP connection rate, and max concurrent sessions per account.
 
-3. **Flask admin defaults are unsafe for production if unchanged.**
-   It starts in debug mode and defaults to `admin/admin` + weak secret fallback. Force explicit secrets in production profile.
+3. **Flask admin now enforces safer startup defaults.**
+   It refuses to start with `admin/admin`, empty password, or weak/default `SECRET_KEY`, and debug is opt-in via `FLASK_DEBUG=1`.
 
 4. **Connection-log retention policy is not implemented.**
    `connections` can grow without bounds; add retention/archival and cleanup tooling.

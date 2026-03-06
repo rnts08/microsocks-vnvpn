@@ -30,6 +30,10 @@ export DATABASE=/absolute/path/to/microsocks.db
 export ADMIN_USER=admin
 export ADMIN_PASS='replace-me'
 export SECRET_KEY='replace-me-with-random-value'
+# optional local-dev bypass only:
+# export ALLOW_INSECURE_DEFAULTS=1
+# optional debug mode (default is off):
+# export FLASK_DEBUG=1
 
 python app.py
 ```
@@ -45,7 +49,7 @@ For production use, at minimum:
 1. Run behind TLS (reverse proxy).
 2. Restrict network access (VPN/private subnet/IP allowlist).
 3. Set strong `ADMIN_USER`/`ADMIN_PASS` and a strong random `SECRET_KEY`.
-4. Do **not** run Flask debug mode in production.
+4. Flask debug mode is **off by default**; only enable with `FLASK_DEBUG=1` for local development.
 5. Add centralized auth (SSO/OIDC) and audit logging if this becomes multi-operator.
 
 ## Current gaps
@@ -54,5 +58,6 @@ For production use, at minimum:
 - No account lockout or login throttling.
 - No built-in retention management for large `connections` tables.
 - Uses HTTP Basic auth only (no MFA/session policy).
+- `ALLOW_INSECURE_DEFAULTS=1` bypass exists for local development and must not be used in production.
 
 See repository root `README.md` for system-wide deployment TODO/fix items.
