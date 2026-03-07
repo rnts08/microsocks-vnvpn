@@ -9,7 +9,7 @@ sysconfdir = /etc
 
 PROG = microsocks
 MSADMIN = msadmin
-SRCS = sockssrv.c server.c sblist.c sblist_delete.c db.c
+SRCS = sockssrv.c server.c sblist.c sblist_delete.c db.c api_client.c
 SRCS_ADMIN = msadmin.c db.c
 OBJS = $(SRCS:.c=.o)
 OBJS_ADMIN = $(SRCS_ADMIN:.c=.o)

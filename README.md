@@ -62,6 +62,34 @@ SQLite is opened with `PRAGMA journal_mode=WAL` for better concurrency.
 
 ### Configuration
 
+### Alternative API-backed auth/accounting backend
+
+In addition to the default local SQLite request-path updates, `microsocks` can delegate authentication and live accounting updates to the Flask admin API.
+
+Set these options in `microsocks.conf`:
+
+```ini
+auth_backend = api
+admin_api_base_url = http://127.0.0.1:5000
+admin_api_token = your-shared-token
+admin_api_timeout_ms = 3000
+```
+
+Then set the same token on the admin service:
+
+```bash
+export SOCKS_API_TOKEN='your-shared-token'
+```
+
+When enabled:
+- SOCKS username/password auth is performed via `POST /api/internal/socks/auth`.
+- Session admission checks (enabled user, max concurrent, monthly quota) are performed via `POST /api/internal/socks/session/start`.
+- Usage accounting is pushed continuously in-session via `POST /api/internal/socks/accounting`.
+- Connection finalization/logging is pushed via `POST /api/internal/socks/session/end`.
+
+This provides an alternative to direct local SQLite writes in the proxy process while preserving the same admin data model.
+
+
 `microsocks` supports:
 
 - config file (default `/etc/microsocks/microsocks.conf`)

@@ -36,6 +36,7 @@
 #include "server.h"
 #include "sblist.h"
 #include "db.h"
+#include "api_client.h"
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <libgen.h>
@@ -91,6 +92,10 @@ struct cfg {
 	int connections_retention_days;
 	char metrics_listen[128];
 	unsigned metrics_port;
+	char auth_backend[16];
+	char admin_api_base_url[256];
+	char admin_api_token[256];
+	int admin_api_timeout_ms;
 };
 
 struct metrics_state {
@@ -133,6 +138,7 @@ static int cfg_connect_rate_limit = 60;
 static int cfg_max_concurrent_per_account = 3;
 static int cfg_connections_retention_days = 90;
 static time_t last_connections_prune = 0;
+static int use_api_backend = 0;
 
 /* Helper: trim whitespace in place */
 static char *trim(char *s) {
@@ -414,6 +420,17 @@ static void read_config_file(const char *path, struct cfg *cfg) {
 			cfg->metrics_listen[sizeof(cfg->metrics_listen)-1] = '\0';
 		} else if(strcasecmp(key, "metrics_port") == 0) {
 			cfg->metrics_port = (unsigned)parse_int_default(val, (int)cfg->metrics_port);
+        } else if(strcasecmp(key, "auth_backend") == 0) {
+            strncpy(cfg->auth_backend, val, sizeof(cfg->auth_backend)-1);
+            cfg->auth_backend[sizeof(cfg->auth_backend)-1] = '\0';
+        } else if(strcasecmp(key, "admin_api_base_url") == 0) {
+            strncpy(cfg->admin_api_base_url, val, sizeof(cfg->admin_api_base_url)-1);
+            cfg->admin_api_base_url[sizeof(cfg->admin_api_base_url)-1] = '\0';
+        } else if(strcasecmp(key, "admin_api_token") == 0) {
+            strncpy(cfg->admin_api_token, val, sizeof(cfg->admin_api_token)-1);
+            cfg->admin_api_token[sizeof(cfg->admin_api_token)-1] = '\0';
+        } else if(strcasecmp(key, "admin_api_timeout_ms") == 0) {
+            cfg->admin_api_timeout_ms = parse_int_default(val, cfg->admin_api_timeout_ms);
         }
     }
     fclose(f);
@@ -666,43 +683,53 @@ static void send_error(int fd, enum errorcode ec) {
 	write(fd, buf, 10);
 }
 
-static void copyloop(int fd1, int fd2, size_t *bytes_fd1_to_fd2, size_t *bytes_fd2_to_fd1) {
-	struct pollfd fds[2] = {
-		[0] = {.fd = fd1, .events = POLLIN},
-		[1] = {.fd = fd2, .events = POLLIN},
-	};
-
+static void copyloop(int fd1, int fd2, size_t *bytes_fd1_to_fd2, size_t *bytes_fd2_to_fd1, int account_id) {
+	int64_t api_sent_delta = 0;
+	int64_t api_recv_delta = 0;
 	while(1) {
-		/* inactive connections are reaped after 15 min to free resources.
-		   usually programs send keep-alive packets so this should only happen
-		   when a connection is really unused. */
-		switch(poll(fds, 2, 60*15*1000)) {
+		struct pollfd fds[2] = {
+			{.fd = fd1, .events = POLLIN},
+			{.fd = fd2, .events = POLLIN},
+		};
+		switch(poll(fds, 2, 120000)) {
+			case 1:
+			case 2:
+				break;
 			case 0:
-				return;
+				goto out;
 			case -1:
 				if(errno == EINTR || errno == EAGAIN) continue;
 				else perror("poll");
-				return;
+				goto out;
 		}
 		int infd = (fds[0].revents & POLLIN) ? fd1 : fd2;
 		int outfd = infd == fd2 ? fd1 : fd2;
-		/* since the biggest stack consumer in the entire code is
-		   libc's getaddrinfo(), we can safely use at least half the
-		   available stacksize to improve throughput. */
 		char buf[MIN(16*1024, THREAD_STACK_SIZE/2)];
 		ssize_t sent = 0, n = read(infd, buf, sizeof buf);
-		if(n <= 0) return;
+		if(n <= 0) goto out;
 		while(sent < n) {
 			ssize_t m = write(outfd, buf+sent, n-sent);
-			if(m < 0) return;
+			if(m < 0) goto out;
 			sent += m;
 		}
-		/* update accounting counters */
 		if(bytes_fd1_to_fd2 && bytes_fd2_to_fd1) {
-			if(infd == fd1) *bytes_fd1_to_fd2 += (size_t)n;
-			else *bytes_fd2_to_fd1 += (size_t)n;
+			if(infd == fd1) {
+				*bytes_fd1_to_fd2 += (size_t)n;
+				api_sent_delta += n;
+			} else {
+				*bytes_fd2_to_fd1 += (size_t)n;
+				api_recv_delta += n;
+			}
+			if(use_api_backend && account_id >= 0 && (api_sent_delta + api_recv_delta) >= 65536) {
+				api_accounting_update(account_id, api_sent_delta, api_recv_delta);
+				api_sent_delta = 0;
+				api_recv_delta = 0;
+			}
 		}
 	}
+out:
+	if(use_api_backend && account_id >= 0 && (api_sent_delta || api_recv_delta))
+		api_accounting_update(account_id, api_sent_delta, api_recv_delta);
 }
 
 static enum errorcode check_credentials(unsigned char* buf, size_t n, struct thread *t) {
@@ -725,6 +752,15 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n, struct thr
 	inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), addr_ptr, client_ip, sizeof(client_ip));
 	if(!auth_fail_rate_allowed(client_ip))
 		return EC_NOT_ALLOWED;
+
+	if(use_api_backend) {
+		if(api_authenticate(user, pass, client_ip, &t->account_id) != 0) {
+			record_auth_failure(client_ip);
+			metrics_auth_failure_inc();
+			return EC_NOT_ALLOWED;
+		}
+		return EC_SUCCESS;
+	}
 
 	/* Use database authentication */
 	{
@@ -827,7 +863,7 @@ static void* clientthread(void *data) {
 			connection_status = "rate_limited";
 			close(remotefd);
 			remotefd = -1;
-		} else if(cfg_max_concurrent_per_account > 0) {
+		} else if(!use_api_backend && cfg_max_concurrent_per_account > 0) {
 			uint64_t db_started = metrics_db_start();
 			int online_now = db_account_get_online(t->account_id);
 			metrics_db_finish(db_started);
@@ -838,7 +874,7 @@ static void* clientthread(void *data) {
 			}
 		}
 	}
-	if(remotefd != -1 && t->account_id >= 0) {
+	if(remotefd != -1 && t->account_id >= 0 && !use_api_backend) {
 		uint64_t quota_db_started = metrics_db_start();
 		int quota_exceeded = account_monthly_quota_exceeded(t->account_id);
 		metrics_db_finish(quota_db_started);
@@ -864,8 +900,22 @@ static void* clientthread(void *data) {
 			}
 		}
 	}
+	if(remotefd != -1 && t->account_id >= 0 && use_api_backend) {
+		char client_ip[INET6_ADDRSTRLEN];
+		void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
+		inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, client_ip, sizeof(client_ip));
+		char reason[64] = {0};
+		if(api_session_start(t->account_id, client_ip, t->dest[0] ? t->dest : "-", cfg_max_concurrent_per_account, reason, sizeof(reason)) != 0) {
+			connection_status = reason[0] ? reason : "session_rejected";
+			close(remotefd);
+			remotefd = -1;
+		} else {
+			online_tracked = 1;
+			metrics_active_sessions_add(+1);
+		}
+	}
 	if(remotefd != -1) {
-		copyloop(t->client.fd, remotefd, &t->bytes_client_to_remote, &t->bytes_remote_to_client);
+		copyloop(t->client.fd, remotefd, &t->bytes_client_to_remote, &t->bytes_remote_to_client, t->account_id);
 		close(remotefd);
 		if(CONFIG_LOG) {
 			char clientname[256];
@@ -876,7 +926,7 @@ static void* clientthread(void *data) {
 				 clientname, t->dest[0] ? t->dest : "-", t->bytes_client_to_remote, t->bytes_remote_to_client);
 		}
 		/* Update bandwidth usage */
-		if(t->account_id >= 0) {
+		if(t->account_id >= 0 && !use_api_backend) {
 			uint64_t db_started = metrics_db_start();
 			db_account_update_bandwidth(t->account_id, t->bytes_client_to_remote, t->bytes_remote_to_client);
 			metrics_db_finish(db_started);
@@ -899,16 +949,22 @@ static void* clientthread(void *data) {
 		char clientname[256];
 		void *ipdata = SOCKADDR_UNION_ADDRESS(&t->client.addr);
 		inet_ntop(SOCKADDR_UNION_AF(&t->client.addr), ipdata, clientname, sizeof clientname);
-		uint64_t db_started = metrics_db_start();
-		db_log_connection(t->account_id, clientname, t->dest[0] ? t->dest : "-",
-						 connection_status,
-						 t->bytes_client_to_remote, t->bytes_remote_to_client);
-		metrics_db_finish(db_started);
-		if(online_tracked) {
+		if(use_api_backend) {
+			api_session_end(t->account_id, clientname, t->dest[0] ? t->dest : "-", connection_status,
+				t->bytes_client_to_remote, t->bytes_remote_to_client, online_tracked);
+			if(online_tracked) metrics_active_sessions_add(-1);
+		} else {
 			uint64_t db_started = metrics_db_start();
-			db_account_update_online(t->account_id, -1);
+			db_log_connection(t->account_id, clientname, t->dest[0] ? t->dest : "-",
+							 connection_status,
+							 t->bytes_client_to_remote, t->bytes_remote_to_client);
 			metrics_db_finish(db_started);
-			metrics_active_sessions_add(-1);
+			if(online_tracked) {
+				uint64_t db_started = metrics_db_start();
+				db_account_update_online(t->account_id, -1);
+				metrics_db_finish(db_started);
+				metrics_active_sessions_add(-1);
+			}
 		}
 	}
 
@@ -953,7 +1009,10 @@ static void print_config(const struct cfg *cfg) {
 		   "max_concurrent_per_account = %d\n"
 		   "connections_retention_days = %d\n"
 		   "metrics_listen = %s\n"
-		   "metrics_port = %u\n",
+		   "metrics_port = %u\n"
+		   "auth_backend = %s\n"
+		   "admin_api_base_url = %s\n"
+		   "admin_api_timeout_ms = %d\n",
 		   cfg->listenip,
 		   cfg->port,
 		   cfg->quiet ? "true" : "false",
@@ -966,7 +1025,10 @@ static void print_config(const struct cfg *cfg) {
 		   cfg->max_concurrent_per_account,
 		   cfg->connections_retention_days,
 		   cfg->metrics_listen,
-		   cfg->metrics_port);
+		   cfg->metrics_port,
+		   cfg->auth_backend,
+		   cfg->admin_api_base_url,
+		   cfg->admin_api_timeout_ms);
 	exit(0);
 }
 
@@ -990,6 +1052,10 @@ static int usage(void) {
 		"  connections_retention_days = <days>\n"
 		"  metrics_listen = <ip>    (metrics HTTP bind address, default 127.0.0.1)\n"
 		"  metrics_port = <port>    (metrics HTTP port, 0 disables endpoint)\n"
+		"  auth_backend = sqlite|api\n"
+		"  admin_api_base_url = <http://host:port>\n"
+		"  admin_api_token = <shared-secret-token>\n"
+		"  admin_api_timeout_ms = <milliseconds>\n"
 		"\n"
 		"CLI flags override values in the config file. If no config is found, sane\n"
 		"defaults are used: quiet=false, listen=0.0.0.0, port=1080, database is\n"
@@ -1050,6 +1116,11 @@ int main(int argc, char** argv) {
 	strncpy(cfg.metrics_listen, "127.0.0.1", sizeof(cfg.metrics_listen)-1);
 	cfg.metrics_listen[sizeof(cfg.metrics_listen)-1] = '\0';
 	cfg.metrics_port = 0;
+	strncpy(cfg.auth_backend, "sqlite", sizeof(cfg.auth_backend)-1);
+	cfg.auth_backend[sizeof(cfg.auth_backend)-1] = '\0';
+	cfg.admin_api_base_url[0] = '\0';
+	cfg.admin_api_token[0] = '\0';
+	cfg.admin_api_timeout_ms = 3000;
 	default_dbpath(cfg.dbpath, sizeof(cfg.dbpath));
 
 	/* read config file if present */
@@ -1188,10 +1259,18 @@ int main(int argc, char** argv) {
 			listenip, port, dbpath, logfile_path[0] ? logfile_path : "stderr");
 	}
 
-	/* Initialize SQLite database */
-	if(db_init(dbpath) != SQLITE_OK) {
-		fprintf(stderr, "Failed to initialize database at %s\n", dbpath);
-		return 1;
+	use_api_backend = (strcasecmp(cfg.auth_backend, "api") == 0);
+	if(use_api_backend) {
+		if(api_client_init(cfg.admin_api_base_url, cfg.admin_api_token, cfg.admin_api_timeout_ms) != 0) {
+			fprintf(stderr, "Failed to initialize API backend. Check admin_api_base_url/token.\n");
+			return 1;
+		}
+	} else {
+		/* Initialize SQLite database */
+		if(db_init(dbpath) != SQLITE_OK) {
+			fprintf(stderr, "Failed to initialize database at %s\n", dbpath);
+			return 1;
+		}
 	}
 	g_metrics.started_at = time(NULL);
 	if(metrics_server_enabled) {
@@ -1218,7 +1297,7 @@ int main(int argc, char** argv) {
 	while(1) {
 		collect(threads);
 		time_t loop_now = time(NULL);
-		if(cfg_connections_retention_days > 0 && (last_connections_prune == 0 || loop_now - last_connections_prune >= 3600)) {
+		if(!use_api_backend && cfg_connections_retention_days > 0 && (last_connections_prune == 0 || loop_now - last_connections_prune >= 3600)) {
 			uint64_t db_started = metrics_db_start();
 			if(db_prune_connections_older_than_days(cfg_connections_retention_days) == SQLITE_OK) {
 				metrics_db_finish(db_started);
@@ -1229,7 +1308,7 @@ int main(int argc, char** argv) {
 			last_connections_prune = loop_now;
 		}
 		int month_key = current_month_key(time(NULL));
-		if(last_reset_month != -1 && month_key != -1 && month_key != last_reset_month) {
+		if(!use_api_backend && last_reset_month != -1 && month_key != -1 && month_key != last_reset_month) {
 			uint64_t db_started2 = metrics_db_start();
 			if(db_reset_monthly_stats() == SQLITE_OK) {
 				metrics_db_finish(db_started2);

@@ -82,6 +82,7 @@ PUBLIC_PACKAGES = _load_json_env('PUBLIC_PACKAGES_JSON', DEFAULT_PUBLIC_PACKAGES
 PUBLIC_CURRENCIES = _load_json_env('PUBLIC_CURRENCIES_JSON', DEFAULT_PUBLIC_CURRENCIES)
 PUBLIC_CONVERSION_RATES = _load_json_env('PUBLIC_CONVERSION_RATES_JSON', DEFAULT_PUBLIC_CONVERSION_RATES)
 PUBLIC_PAYMENT_ADDRESSES = _load_json_env('PUBLIC_PAYMENT_ADDRESSES_JSON', DEFAULT_PUBLIC_PAYMENT_ADDRESSES)
+INTERNAL_SOCKS_API_TOKEN = os.environ.get('SOCKS_API_TOKEN', '').strip()
 
 
 def _is_truthy(value: str) -> bool:
@@ -299,6 +300,16 @@ def _run_connection_retention_if_needed(force: bool = False):
     db.execute('DELETE FROM connections WHERE ts_timestamp < ?', (cutoff,))
     db.commit()
     _last_retention_run = now
+
+
+def _require_internal_api_token():
+    if not INTERNAL_SOCKS_API_TOKEN:
+        return jsonify({'ok': False, 'error': 'internal api disabled'}), 503
+    auth_header = request.headers.get('Authorization', '')
+    expected = f'Bearer {INTERNAL_SOCKS_API_TOKEN}'
+    if not hmac.compare_digest(auth_header, expected):
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+    return None
 
 
 def require_login(role: str | None = None):
@@ -820,6 +831,130 @@ def connections_stats():
     return jsonify(data)
 
 
+
+
+@app.route('/api/internal/socks/auth', methods=['POST'])
+@csrf.exempt
+def internal_socks_auth():
+    denied = _require_internal_api_token()
+    if denied:
+        return denied
+
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get('username') or '').strip()
+    password = payload.get('password') or ''
+    client_ip = (payload.get('client_ip') or '').strip()
+    if not username or not password:
+        return jsonify({'ok': False, 'error': 'missing credentials'}), 400
+
+    db = get_db()
+    row = db.execute('SELECT id, password, enabled, whitelist FROM accounts WHERE username = ?', (username,)).fetchone()
+    if not row or int(row['enabled']) == 0 or not verify_password(row['password'], password):
+        return jsonify({'ok': False, 'error': 'invalid credentials'}), 403
+
+    whitelist = (row['whitelist'] or '').strip()
+    if whitelist:
+        allowed = {ip.strip() for ip in whitelist.split(',') if ip.strip()}
+        if client_ip and client_ip not in allowed:
+            return jsonify({'ok': False, 'error': 'ip not allowed'}), 403
+
+    now = int(time.time())
+    db.execute('UPDATE accounts SET ts_seen = ?, last_client_ip = ? WHERE id = ?', (now, client_ip, row['id']))
+    db.commit()
+    return jsonify({'ok': True, 'account_id': int(row['id'])})
+
+
+@app.route('/api/internal/socks/session/start', methods=['POST'])
+@csrf.exempt
+def internal_socks_session_start():
+    denied = _require_internal_api_token()
+    if denied:
+        return denied
+
+    payload = request.get_json(silent=True) or {}
+    account_id = int(payload.get('account_id') or 0)
+    max_concurrent = int(payload.get('max_concurrent') or 0)
+    if account_id <= 0:
+        return jsonify({'ok': False, 'reason': 'invalid_account'}), 400
+
+    db = get_db()
+    row = db.execute("""SELECT id, enabled, online, monthly_bandwidth,
+                               (m_bytes_sent + m_bytes_received) AS monthly_used
+                        FROM accounts WHERE id = ?""", (account_id,)).fetchone()
+    if not row or int(row['enabled']) == 0:
+        return jsonify({'ok': False, 'reason': 'disabled'}), 403
+
+    if max_concurrent > 0 and int(row['online'] or 0) >= max_concurrent:
+        return jsonify({'ok': False, 'reason': 'max_concurrent_exceeded'}), 409
+
+    limit = int(row['monthly_bandwidth'] or 0)
+    used = int(row['monthly_used'] or 0)
+    if limit > 0 and used >= limit:
+        return jsonify({'ok': False, 'reason': 'bandwidth_limit_exceeded'}), 409
+
+    now = int(time.time())
+    db.execute('UPDATE accounts SET online = online + 1, ts_updated = ? WHERE id = ?', (now, account_id))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/internal/socks/accounting', methods=['POST'])
+@csrf.exempt
+def internal_socks_accounting():
+    denied = _require_internal_api_token()
+    if denied:
+        return denied
+
+    payload = request.get_json(silent=True) or {}
+    account_id = int(payload.get('account_id') or 0)
+    bytes_sent = int(payload.get('bytes_sent') or 0)
+    bytes_received = int(payload.get('bytes_received') or 0)
+    if account_id <= 0:
+        return jsonify({'ok': False, 'error': 'invalid_account'}), 400
+
+    now = int(time.time())
+    db = get_db()
+    db.execute("""UPDATE accounts
+                  SET m_bytes_sent = m_bytes_sent + ?,
+                      m_bytes_received = m_bytes_received + ?,
+                      total_bytes_sent = total_bytes_sent + ?,
+                      total_bytes_received = total_bytes_received + ?,
+                      ts_updated = ?
+                  WHERE id = ?""",
+               (bytes_sent, bytes_received, bytes_sent, bytes_received, now, account_id))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/internal/socks/session/end', methods=['POST'])
+@csrf.exempt
+def internal_socks_session_end():
+    denied = _require_internal_api_token()
+    if denied:
+        return denied
+
+    payload = request.get_json(silent=True) or {}
+    account_id = int(payload.get('account_id') or 0)
+    client_ip = (payload.get('client_ip') or '').strip()
+    destination = (payload.get('destination') or '-').strip() or '-'
+    status = (payload.get('status') or 'failed').strip() or 'failed'
+    bytes_sent = int(payload.get('bytes_sent') or 0)
+    bytes_received = int(payload.get('bytes_received') or 0)
+    online_tracked = int(payload.get('online_tracked') or 0)
+
+    if account_id <= 0:
+        return jsonify({'ok': False, 'error': 'invalid_account'}), 400
+
+    now = int(time.time())
+    db = get_db()
+    db.execute("""INSERT INTO connections(account_id, client_ip, destination, status, bytes_sent, bytes_received, ts_timestamp)
+                  VALUES(?, ?, ?, ?, ?, ?, ?)""",
+               (account_id, client_ip or 'unknown', destination, status, bytes_sent, bytes_received, now))
+    if online_tracked:
+        db.execute('UPDATE accounts SET online = CASE WHEN online <= 0 THEN 0 ELSE online - 1 END, ts_updated = ? WHERE id = ?',
+                   (now, account_id))
+    db.commit()
+    return jsonify({'ok': True})
 
 
 @app.after_request
